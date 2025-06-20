@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+
+{% block title %}Home - Sample Marketing App{% endblock %}
+
+{% block content %}
+<!-- Hero Section -->
+<section class="hero-section bg-gradient py-5">
+    <div class="container">
+        <div class="row align-items-center min-vh-100">
+            <div class="col-lg-6">
+                <h1 class="display-4 fw-bold text-white mb-4">
+                    Discover Amazing Products at Unbeatable Prices
+                </h1>
+                <p class="lead text-white-50 mb-4">
+                    Welcome to MarketPro - your one-stop destination for premium quality products 
+                    that combine innovation, style, and affordability.
+                </p>
+                <div class="d-flex gap-3">
+                    <a href="{{ url_for('products') }}" class="btn btn-light btn-lg px-4">
+                        <i class="fas fa-shopping-bag me-2"></i>Shop Now
+                    </a>
+                    <a href="#features" class="btn btn-outline-light btn-lg px-4">
+                        Learn More
+                    </a>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="hero-image-container">
+                    <i class="fas fa-store hero-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Features Section -->
+<section id="features" class="py-5">
+    <div class="container">
+        <div class="row text-center mb-5">
+            <div class="col-12">
+                <h2 class="display-5 fw-bold">Why Choose MarketPro?</h2>
+                <p class="lead text-muted">We're committed to providing you with the best shopping experience</p>
+            </div>
+        </div>
+        <div class="row g-4">
+            <div class="col-md-4">
+                <div class="feature-card text-center p-4">
+                    <div class="feature-icon mb-3">
+                        <i class="fas fa-shipping-fast"></i>
+                    </div>
+                    <h4>Fast Shipping</h4>
+                    <p class="text-muted">Get your orders delivered quickly with our express shipping options.</p>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="feature-card text-center p-4">
+                    <div class="feature-icon mb-3">
+                        <i class="fas fa-shield-alt"></i>
+                    </div>
+                    <h4>Quality Guarantee</h4>
+                    <p class="text-muted">All our products come with a satisfaction guarantee and warranty.</p>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="feature-card text-center p-4">
+                    <div class="feature-icon mb-3">
+                        <i class="fas fa-headset"></i>
+                    </div>
+                    <h4>24/7 Support</h4>
+                    <p class="text-muted">Our customer support team is always ready to help you.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Featured Products Section -->
+<section class="py-5 bg-light">
+    <div class="container">
+        <div class="row text-center mb-5">
+            <div class="col-12">
+                <h2 class="display-5 fw-bold">Featured Products</h2>
+                <p class="lead text-muted">Check out our most popular items</p>
+            </div>
+        </div>
+        <div class="row g-4">
+            {% for item in featured_items %}
+            <div class="col-lg-4 col-md-6">                <div class="product-card">
+                    <div class="product-image">
+                        {% if item.image_url %}
+                        <img src="{{ item.image_url }}" alt="{{ item.name }}" class="product-img">
+                        {% else %}
+                        <i class="fas fa-box product-placeholder-icon"></i>
+                        {% endif %}
+                    </div>
+                    <div class="product-info">
+                        <span class="badge bg-primary mb-2">{{ item.category }}</span>
+                        <h5 class="product-title">{{ item.name }}</h5>
+                        <p class="product-description">{{ item.description }}</p>
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span class="product-price">${{ "%.2f"|format(item.price) }}</span>
+                            <button class="btn btn-primary btn-sm">
+                                <i class="fas fa-cart-plus me-1"></i>Add to Cart
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="text-center mt-4">
+            <a href="{{ url_for('products') }}" class="btn btn-primary btn-lg">
+                View All Products <i class="fas fa-arrow-right ms-2"></i>
+            </a>
+        </div>
+    </div>
+</section>
+
+<!-- CTA Section -->
+<section class="cta-section py-5">
+    <div class="container">
+        <div class="row text-center">
+            <div class="col-12">
+                <h2 class="display-5 fw-bold text-white mb-4">Ready to Start Shopping?</h2>
+                <p class="lead text-white-50 mb-4">
+                    Join thousands of satisfied customers who trust MarketPro for their shopping needs.
+                </p>
+                <a href="{{ url_for('products') }}" class="btn btn-light btn-lg px-5">
+                    <i class="fas fa-shopping-cart me-2"></i>Start Shopping
+                </a>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- About Section -->
+<section id="about" class="py-5">
+    <div class="container">
+        <div class="row align-items-center">
+            <div class="col-lg-6">
+                <h2 class="display-5 fw-bold mb-4">About MarketPro</h2>
+                <p class="lead">
+                    MarketPro is your trusted online marketplace, connecting you with high-quality 
+                    products from verified sellers around the world.
+                </p>
+                <p>
+                    We believe in making online shopping simple, secure, and enjoyable. Our platform 
+                    offers a curated selection of products across various categories, ensuring you 
+                    find exactly what you're looking for at competitive prices.
+                </p>
+                <div class="row g-3 mt-4">
+                    <div class="col-6">
+                        <div class="stat-item text-center">
+                            <h3 class="fw-bold text-primary">10K+</h3>
+                            <p class="text-muted">Happy Customers</p>
+                        </div>
+                    </div>
+                    <div class="col-6">
+                        <div class="stat-item text-center">
+                            <h3 class="fw-bold text-primary">500+</h3>
+                            <p class="text-muted">Products</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="about-image-container">
+                    <i class="fas fa-users about-icon"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Contact Section -->
+<section id="contact" class="py-5 bg-light">
+    <div class="container">
+        <div class="row text-center mb-5">
+            <div class="col-12">
+                <h2 class="display-5 fw-bold">Get In Touch</h2>
+                <p class="lead text-muted">We'd love to hear from you</p>
+            </div>
+        </div>
+        <div class="row g-4">
+            <div class="col-md-4">
+                <div class="contact-item text-center">
+                    <div class="contact-icon mb-3">
+                        <i class="fas fa-envelope"></i>
+                    </div>
+                    <h5>Email Us</h5>
+                    <p class="text-muted">contact@marketpro.com</p>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="contact-item text-center">
+                    <div class="contact-icon mb-3">
+                        <i class="fas fa-phone"></i>
+                    </div>
+                    <h5>Call Us</h5>
+                    <p class="text-muted">+1 (555) 123-4567</p>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="contact-item text-center">
+                    <div class="contact-icon mb-3">
+                        <i class="fas fa-map-marker-alt"></i>
+                    </div>
+                    <h5>Visit Us</h5>
+                    <p class="text-muted">123 Business St, City, State 12345</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}
