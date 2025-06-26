@@ -103,9 +103,7 @@ class Program
             // Create zip files
             Console.WriteLine("Creating zip files...");
             var sampleMarketingAppZip = Path.Combine(zipDir, "SampleMarketingApp.zip");
-            var sampleMarketingAppBadZip = Path.Combine(zipDir, "SampleMarketingAppBad.zip");
-            
-            CreateZipFile(sampleMarketingAppPath, sampleMarketingAppZip);
+            var sampleMarketingAppBadZip = Path.Combine(zipDir, "SampleMarketingAppBad.zip");            CreateZipFile(sampleMarketingAppPath, sampleMarketingAppZip);
             CreateZipFile(sampleMarketingAppBadPath, sampleMarketingAppBadZip);
 
             // Initialize Azure client
@@ -595,15 +593,13 @@ class Program
                 }
             }
         }
-    }
-
-    private static void CreateBatchScript()
+    }    private static void CreateBatchScript()
     {
         Console.WriteLine("Creating batch script...");
 
         var batchScript = $@"@echo off
-echo Running BadScenarioLinux for {WebAppName}
-dotnet run BadScenarioLinux {WebAppName}
+echo Running BadScenarioLinux for {ResourceName}
+dotnet run BadScenarioLinux {ResourceName}
 pause
 ";
 
