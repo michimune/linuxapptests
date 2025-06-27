@@ -83,27 +83,9 @@ class Program
             if (!Directory.Exists(sampleMarketingAppPath))
             {
                 Console.Error.WriteLine($"Error: SampleMarketingApp directory not found at: {sampleMarketingAppPath}");
-                return 1;
-            }
+                return 1;            }
 
-            if (!Directory.Exists(sampleMarketingAppBadPath))
-            {
-                Console.Error.WriteLine($"Error: SampleMarketingAppBad directory not found at: {sampleMarketingAppBadPath}");
-                return 1;
-            }
-
-            // Create zip directory
-            var zipDir = Path.Combine(SampleAppBaseDir, "zip");
-            if (!Directory.Exists(zipDir))
-            {
-                Directory.CreateDirectory(zipDir);
-                Console.WriteLine($"Created zip directory: {zipDir}");
-            }            // Create zip files
-            Console.WriteLine("Creating zip files...");
-            var sampleMarketingAppZip = Path.Combine(zipDir, "SampleMarketingApp.zip");
-            var sampleMarketingAppBadZip = Path.Combine(zipDir, "SampleMarketingAppBad.zip");
-            CreateZipFile(sampleMarketingAppPath, sampleMarketingAppZip);
-            CreateZipFile(sampleMarketingAppBadPath, sampleMarketingAppBadZip);
+            CreateSampleAppsZipFiles();
 
             // Create the batch script
             CreateBatchScript();
@@ -124,7 +106,53 @@ class Program
         {
             Console.Error.WriteLine($"Error: {ex.Message}");
             return 1;
+        }    }
+
+    private static void CreateSampleAppsZipFiles()
+    {
+        // Validate required directories exist under base directory
+        var sampleMarketingAppPath = Path.Combine(SampleAppBaseDir, "SampleMarketingApp");
+        var sampleMarketingAppBadPath = Path.Combine(SampleAppBaseDir, "SampleMarketingAppBad");
+
+        // Copy SampleMarketingApp to SampleMarketingAppBad and modify requirements.txt
+        Console.WriteLine("Preparing SampleMarketingAppBad directory...");
+        if (Directory.Exists(sampleMarketingAppBadPath))
+        {
+            Directory.Delete(sampleMarketingAppBadPath, true);
+            Console.WriteLine($"Deleted existing SampleMarketingAppBad directory");
         }
+        
+        CopyDirectory(sampleMarketingAppPath, sampleMarketingAppBadPath);
+        Console.WriteLine($"Copied SampleMarketingApp to SampleMarketingAppBad");
+        
+        // Modify requirements.txt in SampleMarketingAppBad
+        var requirementsBadPath = Path.Combine(sampleMarketingAppBadPath, "requirements.txt");
+        if (File.Exists(requirementsBadPath))
+        {
+            var lines = File.ReadAllLines(requirementsBadPath);
+            if (lines.Length > 0)
+            {
+                // Remove the first line
+                var modifiedLines = lines.Skip(1).ToArray();
+                File.WriteAllLines(requirementsBadPath, modifiedLines);
+                Console.WriteLine($"Removed first line from requirements.txt in SampleMarketingAppBad");
+            }
+        }
+
+        // Create zip directory
+        var zipDir = Path.Combine(SampleAppBaseDir, "zip");
+        if (!Directory.Exists(zipDir))
+        {
+            Directory.CreateDirectory(zipDir);
+            Console.WriteLine($"Created zip directory: {zipDir}");
+        }
+        
+        // Create zip files
+        Console.WriteLine("Creating zip files...");
+        var sampleMarketingAppZip = Path.Combine(zipDir, "SampleMarketingApp.zip");
+        var sampleMarketingAppBadZip = Path.Combine(zipDir, "SampleMarketingAppBad.zip");
+        CreateZipFile(sampleMarketingAppPath, sampleMarketingAppZip);
+        CreateZipFile(sampleMarketingAppBadPath, sampleMarketingAppBadZip);
     }
 
     private static void CreateZipFile(string sourceDirectory, string zipFileName)
@@ -932,7 +960,31 @@ pause
             int j = random.Next(i + 1);
             (chars[i], chars[j]) = (chars[j], chars[i]);
         }
-        
-        return new string(chars);
+          return new string(chars);
+    }
+
+    private static void CopyDirectory(string sourceDir, string targetDir)
+    {
+        // Create target directory if it doesn't exist
+        if (!Directory.Exists(targetDir))
+        {
+            Directory.CreateDirectory(targetDir);
+        }
+
+        // Copy all files
+        foreach (string file in Directory.GetFiles(sourceDir))
+        {
+            string fileName = Path.GetFileName(file);
+            string targetFile = Path.Combine(targetDir, fileName);
+            File.Copy(file, targetFile, true);
+        }
+
+        // Copy all subdirectories recursively
+        foreach (string subDir in Directory.GetDirectories(sourceDir))
+        {
+            string dirName = Path.GetFileName(subDir);
+            string targetSubDir = Path.Combine(targetDir, dirName);
+            CopyDirectory(subDir, targetSubDir);
+        }
     }
 }
