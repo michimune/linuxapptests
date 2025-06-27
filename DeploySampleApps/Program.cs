@@ -98,13 +98,15 @@ class Program
             {
                 Directory.CreateDirectory(zipDir);
                 Console.WriteLine($"Created zip directory: {zipDir}");
-            }
-
-            // Create zip files
+            }            // Create zip files
             Console.WriteLine("Creating zip files...");
             var sampleMarketingAppZip = Path.Combine(zipDir, "SampleMarketingApp.zip");
-            var sampleMarketingAppBadZip = Path.Combine(zipDir, "SampleMarketingAppBad.zip");            CreateZipFile(sampleMarketingAppPath, sampleMarketingAppZip);
+            var sampleMarketingAppBadZip = Path.Combine(zipDir, "SampleMarketingAppBad.zip");
+            CreateZipFile(sampleMarketingAppPath, sampleMarketingAppZip);
             CreateZipFile(sampleMarketingAppBadPath, sampleMarketingAppBadZip);
+
+            // Create the batch script
+            CreateBatchScript();
 
             // Initialize Azure client
             _armClient = new ArmClient(new DefaultAzureCredential());
@@ -114,9 +116,6 @@ class Program
 
             // Deploy infrastructure
             await DeployInfrastructure();
-
-            // Create the batch script
-            CreateBatchScript();
 
             Console.WriteLine("Deployment completed successfully!");
             return 0;
@@ -277,7 +276,23 @@ class Program
             .CreateOrUpdateAsync(Azure.WaitUntil.Completed, PostgreSqlServerName, postgresData);
 
         Console.WriteLine($"Created PostgreSQL server: {PostgreSqlServerName}");
-        return postgresLro.Value;
+        
+        var postgresServer = postgresLro.Value;
+        
+        // Create the marketingdb database
+        Console.WriteLine("Creating marketingdb database...");
+        var databaseData = new PostgreSqlFlexibleServerDatabaseData()
+        {
+            Charset = "UTF8",
+            Collation = "en_US.utf8"
+        };
+        
+        var databaseLro = await postgresServer.GetPostgreSqlFlexibleServerDatabases()
+            .CreateOrUpdateAsync(Azure.WaitUntil.Completed, DatabaseName, databaseData);
+            
+        Console.WriteLine($"Created database: {DatabaseName}");
+        
+        return postgresServer;
     }
 
     private static async Task CreatePrivateEndpoint(ResourceGroupResource resourceGroup, 
@@ -592,14 +607,14 @@ class Program
                     Console.WriteLine($"Warning: Could not deploy {zipFileName} after {maxRetries} attempts");
                 }
             }
-        }
-    }    private static void CreateBatchScript()
+        }    }
+
+    private static void CreateBatchScript()
     {
         Console.WriteLine("Creating batch script...");
-
-        var batchScript = $@"@echo off
+          var batchScript = $@"@echo off
 echo Running BadScenarioLinux for {ResourceName}
-dotnet run BadScenarioLinux {ResourceName}
+dotnet run --project BadScenarioLinux\BadScenarioLinux.csproj {SubscriptionId} {ResourceName}
 pause
 ";
 
@@ -892,7 +907,7 @@ pause
         const string upperCase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         const string lowerCase = "abcdefghijklmnopqrstuvwxyz";
         const string digits = "0123456789";
-        const string specialChars = "!@#$%^&*";
+        const string specialChars = "!#$%^&*";
         
         var random = new Random();
         var password = new StringBuilder();

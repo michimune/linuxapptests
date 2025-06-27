@@ -91,6 +91,7 @@ All Azure resources follow the pattern: `{resource-type}-{resource-name}`
 
 ### Database
 - **PostgreSQL Flexible Server**: Standard_B1ms, 32GB storage, PostgreSQL 14
+- **Database Creation**: marketingdb database automatically created during server deployment
 - **Private Endpoint**: Secure database connectivity
 - **Public Access**: Disabled for security
 - **Connection**: Via private DNS resolution through VNet

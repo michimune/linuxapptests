@@ -22,7 +22,7 @@ DeploySampleApps/
 ### Infrastructure Automation
 - ✅ Resource Group creation
 - ✅ Virtual Network with properly configured subnets
-- ✅ PostgreSQL Flexible Server with private endpoint
+- ✅ PostgreSQL Flexible Server with private endpoint and marketingdb database
 - ✅ App Service Plan (S1 Linux with Python 3.11)
 - ✅ Web App with environment variables
 - ✅ Private DNS Zone configuration
@@ -92,7 +92,8 @@ Before running, ensure the base directory contains:
 ## 🔧 Configuration Details
 
 ### Database Connection
-- **Connection String**: `postgresql://marketinguser:P@ssw0rd123!@psql-samplemarketingapps.privatelink.postgres.database.azure.com:5432/marketingdb`
+- **Connection String**: `postgresql://marketinguser:{password}@{server}.privatelink.postgres.database.azure.com:5432/marketingdb`
+- **Database**: marketingdb database created automatically during server deployment
 - **Security**: Private endpoint only, no public access
 - **Version**: PostgreSQL 14
 

@@ -59,7 +59,7 @@ The application expects the following directory structure under the specified ba
 
 ### Compute & Storage
 - **App Service Plan**: S1 Linux tier
-- **PostgreSQL Flexible Server**: Standard_B1ms, 32GB storage, version 14
+- **PostgreSQL Flexible Server**: Standard_B1ms, 32GB storage, version 14, with marketingdb database
 - **Web App**: Python 3.11 runtime with VNet integration
 
 ### Security
