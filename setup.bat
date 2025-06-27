@@ -68,7 +68,7 @@ if %errorlevel% neq 0 (
 echo ========================================
 echo Checking Azure CLI installation...
 echo ========================================
-az --version >nul 2>&1
+call az --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo Azure CLI not found. Installing...
     
