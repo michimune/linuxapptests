@@ -64,6 +64,50 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+:: Check if Azure CLI is installed
+echo ========================================
+echo Checking Azure CLI installation...
+echo ========================================
+az --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Azure CLI not found. Installing...
+    
+    :: Download and install Azure CLI
+    echo Downloading Azure CLI installer...
+    set AZ_INSTALLER=AzureCLI.msi
+    
+    :: Use PowerShell to download the installer
+    powershell -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://aka.ms/installazurecliwindows' -OutFile '%AZ_INSTALLER%'}"
+    
+    if not exist "%AZ_INSTALLER%" (
+        echo Error: Failed to download Azure CLI installer
+        exit /b 1
+    )
+    
+    echo Installing Azure CLI...
+    msiexec /i "%AZ_INSTALLER%" /quiet /norestart
+    
+    if %errorlevel% neq 0 (
+        echo Error: Failed to install Azure CLI
+        exit /b 1
+    )
+    
+    :: Clean up installer
+    del "%AZ_INSTALLER%"
+    
+    echo Azure CLI installed successfully
+    echo Note: You may need to restart your command prompt for az command to work
+) else (
+    echo Azure CLI is already installed
+)
+
+:: Verify Azure CLI installation
+echo Verifying Azure CLI installation...
+az --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Warning: Azure CLI verification failed. You may need to restart your command prompt.
+)
+
 :: Restore and build DeploySampleApps
 echo ========================================
 echo Restoring and building DeploySampleApps...
