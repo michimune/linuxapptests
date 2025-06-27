@@ -119,7 +119,7 @@ echo ========================================
 cd /d "%BASE_DIR%DeploySampleApps"
 
 echo Executing: dotnet run --configuration Release -- "%SUBSCRIPTION_ID%" "%REGION%" "%BASE_DIR%" "%PREFIX%"
-dotnet run --configuration Release -- "%SUBSCRIPTION_ID%" "%REGION%" "%BASE_DIR%" "%PREFIX%"
+dotnet run --configuration Release -- "%SUBSCRIPTION_ID%" "%REGION%" "%BASE_DIR%\" "%PREFIX%"
 
 set DEPLOY_EXIT_CODE=%errorlevel%
 if %DEPLOY_EXIT_CODE% neq 0 (

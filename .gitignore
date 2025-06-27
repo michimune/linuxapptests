@@ -11,6 +11,9 @@
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
+SampleMarketingAppBad/
+zip/
+badapps.bat
 
 # Build results
 [Dd]ebug/

@@ -1,7 +1,7 @@
 {  "profiles": {
     "DeploySampleApps": {
       "commandName": "Project",
-      "commandLineArgs": "YOUR_SUBSCRIPTION_ID eastus d:\\repos\\VibeCoding mymarketingapp"
+      "commandLineArgs": "YOUR_SUBSCRIPTION_ID eastus c:\\work\\linuxapptests mymarketingapp"
     }
   }
 }
