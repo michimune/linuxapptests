@@ -103,7 +103,7 @@ if %errorlevel% neq 0 (
 
 :: Verify Azure CLI installation
 echo Verifying Azure CLI installation...
-az --version >nul 2>&1
+call az --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo Warning: Azure CLI verification failed. You may need to restart your command prompt.
 )
