@@ -108,6 +108,9 @@ if %errorlevel% neq 0 (
     echo Warning: Azure CLI verification failed. You may need to restart your command prompt.
 )
 
+:: Run az login
+call az login
+
 :: Restore and build DeploySampleApps
 echo ========================================
 echo Restoring and building DeploySampleApps...
