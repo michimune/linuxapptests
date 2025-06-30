@@ -31,7 +31,7 @@ if %errorlevel% neq 0 (
     
     :: Download and install .NET 8.0 SDK
     echo Downloading .NET 8.0 SDK installer...
-    set DOTNET_INSTALLER=dotnet-sdk-8.0-win-x64.exe
+    set DOTNET_INSTALLER=%TEMP%\dotnet-sdk-8.0-win-x64.exe
       :: Use PowerShell to download the installer
     powershell -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.411/dotnet-sdk-8.0.411-win-x64.exe' -OutFile '%DOTNET_INSTALLER%'}"
     
@@ -110,6 +110,33 @@ if %errorlevel% neq 0 (
 
 :: Run az login
 call az login
+
+:: Set the Azure subscription
+echo Setting Azure subscription to %SUBSCRIPTION_ID%...
+call az account set -s %SUBSCRIPTION_ID%
+if %errorlevel% neq 0 (
+    echo Error: Failed to set Azure subscription
+    exit /b 1
+)
+
+:: Check if Microsoft.DBforPostgreSQL provider is registered
+echo Checking Microsoft.DBforPostgreSQL provider registration...
+call az provider show -n Microsoft.DBforPostgreSQL --query "registrationState" -o tsv > temp_provider_status.txt
+set /p PROVIDER_STATUS=<temp_provider_status.txt
+del temp_provider_status.txt
+
+if /i "%PROVIDER_STATUS%"=="Registered" (
+    echo Microsoft.DBforPostgreSQL provider is already registered
+) else (
+    echo Microsoft.DBforPostgreSQL provider is not registered. Registering...
+    call az provider register -n Microsoft.DBforPostgreSQL
+    if %errorlevel% neq 0 (
+        echo Error: Failed to register Microsoft.DBforPostgreSQL provider
+        exit /b 1
+    )
+    echo Microsoft.DBforPostgreSQL provider registration initiated
+    echo Note: Provider registration may take a few minutes to complete
+)
 
 :: Restore and build DeploySampleApps
 echo ========================================
