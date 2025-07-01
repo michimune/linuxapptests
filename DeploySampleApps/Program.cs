@@ -773,6 +773,12 @@ pause
             Value = "false" 
         });
 
+        appSettings.Add(new AppServiceNameValuePair() 
+        { 
+            Name = "PRODUCTS_ENABLED", 
+            Value = "1" 
+        });
+
         return appSettings;
     }
 

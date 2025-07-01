@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, abort
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 import os
@@ -84,6 +84,11 @@ def get_item(item_id):
 @app.route('/products')
 def products():
     """Products page showing all items"""
+    # Check if products feature is enabled
+    products_enabled = os.getenv('PRODUCTS_ENABLED', '0')
+    if products_enabled == '0' or not products_enabled:
+        abort(404)
+    
     items = Item.query.all()
     return render_template('products.html', items=items)
 

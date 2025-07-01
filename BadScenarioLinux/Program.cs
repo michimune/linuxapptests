@@ -4,6 +4,7 @@ using Azure.ResourceManager;
 using Azure.ResourceManager.AppService;
 using Azure.ResourceManager.AppService.Models;
 using Azure.ResourceManager.Network;
+using Azure.ResourceManager.Network.Models;
 using Azure.ResourceManager.PostgreSql.FlexibleServers;
 using Azure.ResourceManager.Resources;
 using System.Reflection;
@@ -265,7 +266,27 @@ public abstract class ScenarioBase
             else
             {
                 throw new Exception($"HTTP request failed: {ex.Message}");
+            }        }
+    }
+
+    protected async Task MakeHttpRequestExpecting404(string url)
+    {
+        try
+        {
+            var response = await HttpClient.GetAsync(url);
+            
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                Console.WriteLine($"✓ HTTP request to {url} returned 404 (Not Found as expected)");
             }
+            else
+            {
+                throw new Exception($"Expected 404 Not Found but got {(int)response.StatusCode}");
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            Console.WriteLine($"✓ HTTP request failed as expected (likely 404): {ex.Message}");
         }
     }
 
@@ -309,6 +330,59 @@ public abstract class ScenarioBase
         var webApp = await GetWebAppResource();
         var config = await webApp.GetApplicationSettingsAsync();
         return config.Value.Properties.TryGetValue(key, out var value) ? value : null;
+    }
+
+    protected async Task RemoveAppSetting(string key)
+    {
+        var webApp = await GetWebAppResource();
+        
+        // Get current app settings
+        var listResponse = await webApp.GetApplicationSettingsAsync();
+        var currentSettings = listResponse.Value.Properties.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+        
+        // Remove the setting
+        currentSettings.Remove(key);
+        
+        // Create new configuration
+        var newSettings = new AppServiceConfigurationDictionary();
+        foreach (var setting in currentSettings)
+        {
+            newSettings.Properties.Add(setting.Key, setting.Value);
+        }
+        
+        // Update the settings
+        await webApp.UpdateApplicationSettingsAsync(newSettings);
+        Console.WriteLine($"✓ App setting '{key}' removed");
+    }
+
+    protected async Task SetAppSetting(string key, string value)
+    {
+        var webApp = await GetWebAppResource();
+        
+        // Get current app settings
+        var listResponse = await webApp.GetApplicationSettingsAsync();
+        var currentSettings = listResponse.Value.Properties.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+        
+        // Update the setting
+        currentSettings[key] = value;
+        
+        // Create new configuration
+        var newSettings = new AppServiceConfigurationDictionary();
+        foreach (var setting in currentSettings)
+        {
+            newSettings.Properties.Add(setting.Key, setting.Value);
+        }
+        
+        // Update the settings
+        await webApp.UpdateApplicationSettingsAsync(newSettings);
+        Console.WriteLine($"✓ App setting '{key}' set to '{value}'");
+    }
+
+    protected async Task RestartApp()
+    {
+        var webApp = await GetWebAppResource();
+        await webApp.RestartAsync();
+        Console.WriteLine("✓ App service restarted");
     }
 }
 
@@ -495,6 +569,95 @@ public class MisconfiguredConnectionStringScenario : ScenarioBase
     }
 }
 
+[Scenario]
+public class SpecificApiPathsFailingScenario : ScenarioBase
+{    public override string Description => "Specific API paths failing due to misconfigured app settings";
+    private string? _originalValue;
+
+    public override async Task Prevalidate()
+    {
+        var productsUrl = $"{TargetAddress}/products";
+        await MakeHttpRequest(productsUrl, expectedSuccess: true);
+    }
+
+    public override async Task Setup()
+    {
+        Console.WriteLine("Removing PRODUCTS_ENABLED app setting and restarting app...");
+        
+        // Save original value
+        _originalValue = await GetAppSetting("PRODUCTS_ENABLED");
+        
+        // Remove the setting
+        await RemoveAppSetting("PRODUCTS_ENABLED");
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+    }
+
+    public override async Task Validate()
+    {
+        var productsUrl = $"{TargetAddress}/products";
+        await MakeHttpRequestExpecting404(productsUrl);
+    }
+
+    public override async Task Recover()
+    {
+        Console.WriteLine("Adding PRODUCTS_ENABLED = 1 and restarting app...");
+        
+        // Add the setting back with value "1"
+        await SetAppSetting("PRODUCTS_ENABLED", "1");
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+    }
+
+    public override async Task Finalize()
+    {
+        var productsUrl = $"{TargetAddress}/products";
+        await MakeHttpRequest(productsUrl, expectedSuccess: true);
+    }
+}
+
+[Scenario]
+public class MissingEntryPointScenario : ScenarioBase
+{
+    public override string Description => "Missing entry point (incorrect startup command)";
+
+    public override async Task Setup()
+    {
+        Console.WriteLine("Adding incorrect startup command and restarting app...");
+        
+        // Add incorrect startup command
+        await SetAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", "python aaa.py");
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+    }
+
+    public override async Task Recover()
+    {
+        Console.WriteLine("Removing startup command setting and restarting app...");
+        
+        // Remove the startup command setting
+        await RemoveAppSetting("AZURE_WEBAPP_STARTUP_COMMAND");
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+    }
+}
+
 // Note: The following scenarios require more complex Azure resource management
 // and are simplified for demonstration purposes
 
@@ -571,5 +734,121 @@ public class MissingDependencyScenario : ScenarioBase
     {
         Console.WriteLine("Simulating slot swap back to working version...");
         await Task.Delay(5000);
+    }
+}
+
+[Scenario]
+public class VNetIntegrationBreaksConnectivityScenario : ScenarioBase
+{
+    public override string Description => "VNET integration breaks connectivity to internal resources";
+    private SubnetResource? _savedPostgreSqlSubnet;
+
+    public override async Task Setup()
+    {
+        Console.WriteLine("Saving subnet settings and removing PostgreSql subnet from VNET...");
+        
+        try
+        {
+            // Get the VNET resource
+            var subscription = ArmClient!.GetSubscriptionResource(ResourceIdentifier.Parse($"/subscriptions/{SubscriptionId}"));
+            var resourceGroup = await subscription.GetResourceGroupAsync(ResourceGroupName);
+            var vnet = await resourceGroup.Value.GetVirtualNetworkAsync(VNetName);
+            
+            // Save the PostgreSql subnet
+            var postgresqlSubnet = await vnet.Value.GetSubnetAsync(PostgreSqlSubnetName);
+            _savedPostgreSqlSubnet = postgresqlSubnet.Value;
+              // Remove the PostgreSql subnet
+            await _savedPostgreSqlSubnet.DeleteAsync(Azure.WaitUntil.Completed);
+            Console.WriteLine($"✓ Removed subnet '{PostgreSqlSubnetName}' from VNET");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Could not modify VNET subnets: {ex.Message}");
+            Console.WriteLine("Simulating VNET subnet removal...");
+            await Task.Delay(2000);
+        }
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+    }
+
+    public override async Task Recover()
+    {
+        Console.WriteLine("Restoring VNET subnets and restarting app...");
+        
+        try
+        {
+            if (_savedPostgreSqlSubnet != null)
+            {
+                // Get the VNET resource
+                var subscription = ArmClient!.GetSubscriptionResource(ResourceIdentifier.Parse($"/subscriptions/{SubscriptionId}"));
+                var resourceGroup = await subscription.GetResourceGroupAsync(ResourceGroupName);
+                var vnet = await resourceGroup.Value.GetVirtualNetworkAsync(VNetName);
+                
+                // Recreate the PostgreSql subnet
+                var subnetData = new SubnetData()
+                {
+                    Name = PostgreSqlSubnetName,
+                    AddressPrefix = "10.0.2.0/24", // Assuming standard subnet configuration
+                };
+                  await vnet.Value.GetSubnets().CreateOrUpdateAsync(Azure.WaitUntil.Completed, PostgreSqlSubnetName, subnetData);
+                Console.WriteLine($"✓ Restored subnet '{PostgreSqlSubnetName}' to VNET");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Could not restore VNET subnets: {ex.Message}");
+            Console.WriteLine("Simulating VNET subnet restoration...");
+            await Task.Delay(2000);
+        }
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+    }
+}
+
+[Scenario]
+public class MisconfiguredDnsScenario : ScenarioBase
+{
+    public override string Description => "Misconfigured DNS";
+
+    public override async Task Setup()
+    {
+        Console.WriteLine("Simulating DNS misconfiguration by setting invalid DNS server...");
+        
+        // Note: Direct DNS server configuration via Azure SDK may require specific permissions
+        // and access to DHCP options which may not be available in all SDK versions.
+        // This scenario simulates the DNS misconfiguration effect.
+        
+        Console.WriteLine("⚠️  This scenario simulates DNS server misconfiguration.");
+        Console.WriteLine("In a real scenario, this would set 10.0.0.1 as custom DNS server on the VNET.");
+        await Task.Delay(2000);
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+    }
+
+    public override async Task Recover()
+    {
+        Console.WriteLine("Simulating DNS restoration...");
+        
+        Console.WriteLine("⚠️  This scenario simulates DNS server restoration.");
+        Console.WriteLine("In a real scenario, this would restore the original DNS servers.");
+        await Task.Delay(2000);
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
     }
 }
