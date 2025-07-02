@@ -3,6 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 import os
 import requests
+import sys
 
 # Load environment variables
 load_dotenv()
@@ -331,6 +332,51 @@ def thread_exhaustion_fault():
     except Exception as e:
         print(f"Thread exhaustion fault endpoint failed: {e}")
         return jsonify({"error": "Thread exhaustion fault failed", "details": str(e)}), 500
+
+@app.route('/api/faults/badwrite')
+def bad_write_fault():
+    """Endpoint that attempts to write to a restricted/non-existent file path and exits the program"""
+    try:
+        print("Starting bad write test...")
+        
+        file_path = "/proc/badwrite"
+        content = "ABC"
+        
+        print(f"Attempting to write '{content}' to {file_path}...")
+        
+        # Attempt to write to the restricted/non-existent path
+        try:
+            with open(file_path, 'w') as f:
+                f.write(content)
+            
+            # If we somehow succeed (shouldn't happen), still exit
+            print(f"Unexpected success writing to {file_path} - exiting anyway")
+            sys.exit(0)
+            
+        except PermissionError as e:
+            print(f"Permission denied writing to {file_path}: {e}")
+            print("Exiting program due to permission error")
+            sys.exit(1)
+            
+        except FileNotFoundError as e:
+            print(f"File not found: {file_path}: {e}")
+            print("Exiting program due to file not found error")
+            sys.exit(1)
+            
+        except OSError as e:
+            print(f"OS error writing to {file_path}: {e}")
+            print("Exiting program due to OS error")
+            sys.exit(1)
+            
+        except IOError as e:
+            print(f"IO error writing to {file_path}: {e}")
+            print("Exiting program due to IO error")
+            sys.exit(1)
+    
+    except Exception as e:
+        print(f"Bad write fault endpoint failed: {e}")
+        print("Exiting program due to unexpected error")
+        sys.exit(1)
 
 # Create tables
 def create_tables():
