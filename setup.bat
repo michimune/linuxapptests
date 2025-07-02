@@ -13,6 +13,7 @@ set SUBSCRIPTION_ID=%~1
 set REGION=%~2
 set PREFIX=%~3
 set BASE_DIR=%~dp0
+set DOTNET_INSTALLER=dotnet-sdk-8.0-win-x64.exe
 
 echo ========================================
 echo Azure Sample Apps Setup Script
@@ -31,7 +32,6 @@ if %errorlevel% neq 0 (
     
     :: Download and install .NET 8.0 SDK
     echo Downloading .NET 8.0 SDK installer...
-    set DOTNET_INSTALLER=%TEMP%\dotnet-sdk-8.0-win-x64.exe
       :: Use PowerShell to download the installer
     powershell -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.411/dotnet-sdk-8.0.411-win-x64.exe' -OutFile '%DOTNET_INSTALLER%'}"
     
@@ -42,11 +42,6 @@ if %errorlevel% neq 0 (
     
     echo Installing .NET 8.0 SDK...
     "%DOTNET_INSTALLER%" /quiet /norestart
-    
-    if %errorlevel% neq 0 (
-        echo Error: Failed to install .NET 8.0 SDK
-        exit /b 1
-    )
     
     :: Clean up installer
     del "%DOTNET_INSTALLER%"
