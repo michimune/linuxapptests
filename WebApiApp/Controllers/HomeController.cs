@@ -24,10 +24,10 @@ public class HomeController : ControllerBase
     /// Waits 10 seconds and returns a 200 OK response
     /// </summary>
     /// <returns>200 OK response after 10 second delay</returns>
-    [HttpGet("slotapi")]
-    public async Task<IActionResult> SlotApi()
+    [HttpGet("slowapi")]
+    public async Task<IActionResult> SlowApi()
     {
         await Task.Delay(10000); // Wait 10 seconds
-        return Ok();
+        return Ok(new { message = "OK" });
     }
 }
