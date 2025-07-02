@@ -15,8 +15,19 @@ public class HomeController : ControllerBase
     {
         var response = new Dictionary<string, string>
         {
-            { "AppValue", AppConfiguration.AppValue }
+            { "APP_VALUE", AppConfiguration.AppValue }
         };
         return Ok(response);
+    }
+
+    /// <summary>
+    /// Waits 10 seconds and returns a 200 OK response
+    /// </summary>
+    /// <returns>200 OK response after 10 second delay</returns>
+    [HttpGet("slotapi")]
+    public async Task<IActionResult> SlotApi()
+    {
+        await Task.Delay(10000); // Wait 10 seconds
+        return Ok();
     }
 }

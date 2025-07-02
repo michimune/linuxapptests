@@ -38,6 +38,7 @@ class Program
     private static string PostgreSqlSubnetName => "subnet-postgresql";
     private static string AppServicePlanName => $"asp-{ResourceName}";
     private static string WebAppName => $"webapp-{ResourceName}";
+    private static string WebApiAppName => $"webapi-{ResourceName}";
     private static string PostgreSqlServerName => $"psql-{ResourceName}";
     private static string PrivateEndpointName => $"pe-postgresql-{ResourceName}";
 
@@ -64,6 +65,7 @@ class Program
             Console.WriteLine($"  VNet: {VNetName}");
             Console.WriteLine($"  App Service Plan: {AppServicePlanName}");
             Console.WriteLine($"  Web App: {WebAppName}");
+            Console.WriteLine($"  Web API App: {WebApiAppName}");
             Console.WriteLine($"  PostgreSQL Server: {PostgreSqlServerName}");
             Console.WriteLine($"  Private Endpoint: {PrivateEndpointName}");
             Console.WriteLine($"  Database Password: {DatabasePassword}");
@@ -151,8 +153,22 @@ class Program
         Console.WriteLine("Creating zip files...");
         var sampleMarketingAppZip = Path.Combine(zipDir, "SampleMarketingApp.zip");
         var sampleMarketingAppBadZip = Path.Combine(zipDir, "SampleMarketingAppBad.zip");
+        var webApiAppZip = Path.Combine(zipDir, "WebApiApp.zip");
+        
         CreateZipFile(sampleMarketingAppPath, sampleMarketingAppZip);
         CreateZipFile(sampleMarketingAppBadPath, sampleMarketingAppBadZip);
+        
+        // Create WebApiApp zip from published output
+        var webApiAppPublishPath = Path.Combine(SampleAppBaseDir, "WebApiApp", "bin", "Release", "publish");
+        if (Directory.Exists(webApiAppPublishPath))
+        {
+            CreateZipFile(webApiAppPublishPath, webApiAppZip);
+        }
+        else
+        {
+            Console.WriteLine($"Warning: WebApiApp publish directory not found at: {webApiAppPublishPath}");
+            Console.WriteLine("Make sure to build and publish WebApiApp before running this deployment");
+        }
     }
 
     private static void CreateZipFile(string sourceDirectory, string zipFileName)
@@ -200,14 +216,26 @@ class Program
             // Create Web App
             var webApp = await CreateWebApp(resourceGroup, appServicePlan);
 
+            // Create Web API App
+            var webApiApp = await CreateWebApiApp(resourceGroup, appServicePlan);
+
             // Configure VNet integration for Web App
             await ConfigureVNetIntegration(webApp, vnet);
+
+            // Configure VNet integration for Web API App
+            await ConfigureVNetIntegration(webApiApp, vnet);
 
             // Deploy applications
             await DeployApplications(webApp);
 
+            // Deploy Web API App
+            await DeployWebApiApp(webApiApp);
+
             // Test production web app connectivity
             await TestProductionWebApp(webApp);
+
+            // Test Web API App connectivity
+            await TestWebApiApp(webApiApp);
         }
         catch (Azure.RequestFailedException azureEx)
         {
@@ -457,6 +485,29 @@ class Program
         return webAppLro.Value;
     }
 
+    private static async Task<WebSiteResource> CreateWebApiApp(ResourceGroupResource resourceGroup, 
+        AppServicePlanResource appServicePlan)
+    {
+        Console.WriteLine("Creating Web API App...");
+
+        var webApiAppData = new WebSiteData(Region)
+        {
+            AppServicePlanId = appServicePlan.Data.Id,
+            SiteConfig = new SiteConfigProperties()
+            {
+                LinuxFxVersion = "DOTNETCORE|8.0", // .NET 8.0
+                AppSettings = CreateWebApiAppSettings()
+            },
+            IsHttpsOnly = true
+        };
+
+        var webApiAppLro = await resourceGroup.GetWebSites()
+            .CreateOrUpdateAsync(Azure.WaitUntil.Completed, WebApiAppName, webApiAppData);
+
+        Console.WriteLine($"Created Web API App: {WebApiAppName}");
+        return webApiAppLro.Value;
+    }
+
     private static async Task ConfigureVNetIntegration(WebSiteResource webApp, VirtualNetworkResource vnet)
     {
         Console.WriteLine("Configuring Swift VNet integration...");
@@ -537,6 +588,28 @@ class Program
         await RestartWebApp(webApp, isProduction: false);
 
         Console.WriteLine("Applications deployed successfully");
+    }
+
+    private static async Task DeployWebApiApp(WebSiteResource webApiApp)
+    {
+        Console.WriteLine("Deploying Web API App...");
+
+        // Deploy Web API application
+        var webApiAppZip = Path.Combine(SampleAppBaseDir, "zip", "WebApiApp.zip");
+        if (File.Exists(webApiAppZip))
+        {
+            await DeployZipFile(webApiApp, webApiAppZip, isProduction: true);
+            
+            // Restart Web API App after deployment
+            await RestartWebApp(webApiApp, isProduction: true);
+            
+            Console.WriteLine("Web API App deployed successfully");
+        }
+        else
+        {
+            Console.WriteLine($"Warning: WebApiApp.zip not found at: {webApiAppZip}");
+            Console.WriteLine("Skipping Web API App deployment");
+        }
     }
 
     private static async Task DeployZipFile(WebSiteResource webApp, string zipFileName, bool isProduction)
@@ -643,7 +716,6 @@ class Program
           var batchScript = $@"@echo off
 echo Running BadScenarioLinux for {ResourceName}
 dotnet run --project BadScenarioLinux\BadScenarioLinux.csproj {SubscriptionId} {ResourceName}
-pause
 ";
 
         var batchScriptPath = Path.Combine(SampleAppBaseDir, "badapps.bat");
@@ -777,6 +849,44 @@ pause
         { 
             Name = "PRODUCTS_ENABLED", 
             Value = "1" 
+        });
+
+        appSettings.Add(new AppServiceNameValuePair() 
+        { 
+            Name = "WEBAPI_URL", 
+            Value = $"https://{WebApiAppName}.azurewebsites.net" 
+        });
+
+        return appSettings;
+    }
+
+    private static List<AppServiceNameValuePair> CreateWebApiAppSettings()
+    {
+        // Environment Variables configuration for Web API App
+        var appSettings = new List<AppServiceNameValuePair>();
+        
+        appSettings.Add(new AppServiceNameValuePair() 
+        { 
+            Name = "DATABASE_URL", 
+            Value = GetDatabaseConnectionString() 
+        });
+        
+        appSettings.Add(new AppServiceNameValuePair() 
+        { 
+            Name = "ASPNETCORE_ENVIRONMENT", 
+            Value = "Production" 
+        });
+
+        appSettings.Add(new AppServiceNameValuePair() 
+        { 
+            Name = "WEBSITES_ENABLE_APP_SERVICE_STORAGE", 
+            Value = "false" 
+        });
+
+        appSettings.Add(new AppServiceNameValuePair() 
+        { 
+            Name = "APP_VALUE", 
+            Value = "abcde" 
         });
 
         return appSettings;
@@ -931,6 +1041,59 @@ pause
         }
         
         Console.WriteLine($"⚠ Production web app did not respond successfully after {maxAttempts} attempts");
+        Console.WriteLine("Note: This may be normal if the application is still starting up");
+    }
+
+    private static async Task TestWebApiApp(WebSiteResource webApiApp)
+    {
+        Console.WriteLine("Testing Web API App connectivity...");
+        
+        var webApiAppUrl = $"https://{webApiApp.Data.DefaultHostName}";
+        const int maxAttempts = 5;
+        const int delaySeconds = 10;
+        
+        using var httpClient = new HttpClient();
+        httpClient.Timeout = TimeSpan.FromSeconds(30);
+        
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                Console.WriteLine($"Attempt {attempt}/{maxAttempts}: Testing {webApiAppUrl}");
+                
+                var response = await httpClient.GetAsync(webApiAppUrl);
+                
+                if (response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"✓ Web API App is responding successfully (Status: {response.StatusCode})");
+                    return;
+                }
+                else
+                {
+                    Console.WriteLine($"⚠ Web API App responded with status: {response.StatusCode}");
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"⚠ HTTP request failed on attempt {attempt}: {ex.Message}");
+            }
+            catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException)
+            {
+                Console.WriteLine($"⚠ Request timed out on attempt {attempt}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠ Unexpected error on attempt {attempt}: {ex.Message}");
+            }
+            
+            if (attempt < maxAttempts)
+            {
+                Console.WriteLine($"Waiting {delaySeconds} seconds before next attempt...");
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+            }
+        }
+        
+        Console.WriteLine($"⚠ Web API App did not respond successfully after {maxAttempts} attempts");
         Console.WriteLine("Note: This may be normal if the application is still starting up");
     }
 

@@ -965,3 +965,81 @@ public class IncorrectWriteAccessScenario : ScenarioBase
         Console.WriteLine("✓ Recovery wait period completed");
     }
 }
+
+[Scenario]
+public class OutdatedTlsVersionScenario : ScenarioBase
+{
+    public override string Description => "App uses outdated TLS version for outbound connections";
+
+    public override async Task Validate()
+    {
+        Console.WriteLine("Making HTTP request to test TLS version compatibility...");
+        
+        var badTlsUrl = $"{TargetAddress}/api/faults/badtls";
+        
+        try
+        {
+            var response = await HttpClient.GetAsync(badTlsUrl);
+            
+            if ((int)response.StatusCode >= 500)
+            {
+                Console.WriteLine($"✓ HTTP request to {badTlsUrl} returned {(int)response.StatusCode} (TLS error as expected)");
+            }
+            else
+            {
+                Console.WriteLine($"⚠️  HTTP request to {badTlsUrl} returned {(int)response.StatusCode} (expected TLS failure)");
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            Console.WriteLine($"✓ HTTP request to {badTlsUrl} failed due to TLS issue: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"✓ HTTP request to {badTlsUrl} triggered TLS-related error: {ex.Message}");
+        }
+    }
+}
+
+[Scenario]
+public class ExternalApiLatencyScenario : ScenarioBase
+{
+    public override string Description => "External API latency causes user-visible slowness";
+
+    public override async Task Validate()
+    {
+        Console.WriteLine("Measuring latency of HTTP request to slow API endpoint...");
+        
+        var slowCallUrl = $"{TargetAddress}/api/faults/slowcall";
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        
+        try
+        {
+            var response = await HttpClient.GetAsync(slowCallUrl);
+            stopwatch.Stop();
+            
+            var latencyMs = stopwatch.ElapsedMilliseconds;
+            Console.WriteLine($"✓ HTTP request to {slowCallUrl} completed with status {(int)response.StatusCode}");
+            Console.WriteLine($"✓ Measured latency: {latencyMs} ms");
+            
+            if (latencyMs > 5000) // 5 seconds
+            {
+                Console.WriteLine($"⚠️  High latency detected: {latencyMs} ms (> 5000 ms threshold)");
+            }
+            else if (latencyMs > 2000) // 2 seconds
+            {
+                Console.WriteLine($"⚠️  Moderate latency detected: {latencyMs} ms (> 2000 ms threshold)");
+            }
+            else
+            {
+                Console.WriteLine($"✓ Latency within acceptable range: {latencyMs} ms");
+            }
+        }
+        catch (Exception ex)
+        {
+            stopwatch.Stop();
+            var latencyMs = stopwatch.ElapsedMilliseconds;
+            Console.WriteLine($"✓ HTTP request to {slowCallUrl} failed after {latencyMs} ms: {ex.Message}");
+        }
+    }
+}

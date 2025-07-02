@@ -378,6 +378,247 @@ def bad_write_fault():
         print("Exiting program due to unexpected error")
         sys.exit(1)
 
+@app.route('/api/faults/badtls')
+def bad_tls_fault():
+    """Endpoint that attempts to make HTTPS connection with deprecated TLS 1.0"""
+    try:
+        print("Starting bad TLS test...")
+        
+        # Get the target URL from environment variable
+        webapi_url = os.getenv('WEBAPI_URL')
+        if not webapi_url:
+            print("ERROR: WEBAPI_URL environment variable is not defined!")
+            result = {
+                "error": "Configuration error",
+                "details": "WEBAPI_URL environment variable is not set",
+                "error_type": "ConfigurationError"
+            }
+            return jsonify(result), 500
+        
+        print(f"Attempting HTTPS connection with TLS 1.0 to: {webapi_url}")
+        
+        # Import required modules for TLS configuration
+        try:
+            import ssl
+            import urllib3
+            from urllib3.util.ssl_ import create_urllib3_context
+            from requests.adapters import HTTPAdapter
+        except ImportError as import_error:
+            print(f"Missing required dependencies for TLS configuration: {import_error}")
+            result = {
+                "error": "Missing dependencies",
+                "details": f"Required modules not available: {str(import_error)}",
+                "error_type": "ImportError"
+            }
+            return jsonify(result), 500
+        
+        try:
+            # Create a custom SSL context that forces TLS 1.0
+            context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)  # Force TLS 1.0 only
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            # Disable urllib3 warnings for unverified HTTPS requests
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            # Create a custom adapter for requests that uses TLS 1.0
+            class TLS10Adapter(HTTPAdapter):
+                def init_poolmanager(self, *args, **kwargs):
+                    ctx = create_urllib3_context()
+                    ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+                    ctx.minimum_version = ssl.TLSVersion.TLSv1
+                    ctx.maximum_version = ssl.TLSVersion.TLSv1
+                    kwargs['ssl_context'] = ctx
+                    return super().init_poolmanager(*args, **kwargs)
+            
+            # Create a session with the TLS 1.0 adapter
+            session = requests.Session()
+            session.mount('https://', TLS10Adapter())
+            
+            print("Making HTTPS request with TLS 1.0...")
+            response = session.get(webapi_url, timeout=30, verify=False)
+            
+            # If we somehow succeed (very unlikely with modern servers)
+            result = {
+                "message": f"Unexpected success with TLS 1.0 connection to {webapi_url}",
+                "url": webapi_url,
+                "status_code": response.status_code,
+                "tls_version": "1.0",
+                "response_size": len(response.content)
+            }
+            print(f"Unexpected TLS 1.0 success: {response.status_code}")
+            return jsonify(result)
+            
+        except ssl.SSLError as e:
+            print(f"SSL error with TLS 1.0 connection: {e}")
+            result = {
+                "error": "SSL/TLS error",
+                "url": webapi_url,
+                "tls_version": "1.0",
+                "details": str(e),
+                "error_type": "SSLError"
+            }
+            return jsonify(result), 500
+            
+        except requests.exceptions.SSLError as e:
+            print(f"Requests SSL error with TLS 1.0: {e}")
+            result = {
+                "error": "HTTPS connection failed",
+                "url": webapi_url,
+                "tls_version": "1.0", 
+                "details": str(e),
+                "error_type": "RequestsSSLError"
+            }
+            return jsonify(result), 500
+            
+        except requests.exceptions.ConnectionError as e:
+            print(f"Connection error with TLS 1.0: {e}")
+            result = {
+                "error": "Connection failed",
+                "url": webapi_url,
+                "tls_version": "1.0",
+                "details": str(e),
+                "error_type": "ConnectionError"
+            }
+            return jsonify(result), 500
+            
+        except requests.exceptions.Timeout as e:
+            print(f"Timeout error with TLS 1.0: {e}")
+            result = {
+                "error": "Request timeout",
+                "url": webapi_url,
+                "tls_version": "1.0",
+                "details": str(e),
+                "error_type": "TimeoutError"
+            }
+            return jsonify(result), 500
+            
+        except Exception as e:
+            print(f"Unexpected error during TLS 1.0 connection: {e}")
+            result = {
+                "error": "Unexpected connection error",
+                "url": webapi_url,
+                "tls_version": "1.0",
+                "details": str(e),
+                "error_type": type(e).__name__
+            }
+            return jsonify(result), 500
+    
+    except Exception as e:
+        print(f"Bad TLS fault endpoint failed: {e}")
+        return jsonify({"error": "Bad TLS fault failed", "details": str(e)}), 500
+
+@app.route('/api/faults/slowcall')
+def slow_call_fault():
+    """Endpoint that makes HTTP connection to a slow API endpoint"""
+    try:
+        print("Starting slow call test...")
+        
+        # Get the target URL from environment variable
+        webapi_url = os.getenv('WEBAPI_URL')
+        if not webapi_url:
+            print("ERROR: WEBAPI_URL environment variable is not defined!")
+            result = {
+                "error": "Configuration error",
+                "details": "WEBAPI_URL environment variable is not set",
+                "error_type": "ConfigurationError"
+            }
+            return jsonify(result), 500
+        
+        # Construct the slow API endpoint URL
+        slow_api_url = f"{webapi_url.rstrip('/')}/slowapi"
+        print(f"Making HTTP request to slow endpoint: {slow_api_url}")
+        
+        try:
+            import time
+            start_time = time.time()
+            
+            # Make request with extended timeout for slow responses
+            print("Sending request to slow API endpoint...")
+            response = requests.get(slow_api_url, timeout=120)  # 2 minute timeout
+            
+            end_time = time.time()
+            response_time = end_time - start_time
+            
+            print(f"Request completed in {response_time:.2f} seconds")
+            
+            result = {
+                "message": f"Slow call completed to {slow_api_url}",
+                "url": slow_api_url,
+                "status_code": response.status_code,
+                "response_time_seconds": round(response_time, 2),
+                "response_size": len(response.content),
+                "content_type": response.headers.get('content-type', 'unknown')
+            }
+            
+            # Log response details
+            print(f"Response: {response.status_code}, Time: {response_time:.2f}s, Size: {len(response.content)} bytes")
+            
+            # Return 500 if the response indicates an error or if it took too long
+            if response.status_code >= 400:
+                result["error"] = f"HTTP error {response.status_code}"
+                return jsonify(result), 500
+            elif response_time > 60:  # Consider calls over 1 minute as problematic
+                result["error"] = "Response time exceeded acceptable threshold"
+                return jsonify(result), 500
+            else:
+                return jsonify(result)
+            
+        except requests.exceptions.Timeout as e:
+            print(f"Request timeout to slow API: {e}")
+            result = {
+                "error": "Request timeout",
+                "url": slow_api_url,
+                "timeout_seconds": 120,
+                "details": str(e),
+                "error_type": "TimeoutError"
+            }
+            return jsonify(result), 500
+            
+        except requests.exceptions.ConnectionError as e:
+            print(f"Connection error to slow API: {e}")
+            result = {
+                "error": "Connection failed",
+                "url": slow_api_url,
+                "details": str(e),
+                "error_type": "ConnectionError"
+            }
+            return jsonify(result), 500
+            
+        except requests.exceptions.HTTPError as e:
+            print(f"HTTP error from slow API: {e}")
+            result = {
+                "error": "HTTP error",
+                "url": slow_api_url,
+                "details": str(e),
+                "error_type": "HTTPError"
+            }
+            return jsonify(result), 500
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Request exception to slow API: {e}")
+            result = {
+                "error": "Request failed",
+                "url": slow_api_url,
+                "details": str(e),
+                "error_type": "RequestException"
+            }
+            return jsonify(result), 500
+            
+        except Exception as e:
+            print(f"Unexpected error during slow API call: {e}")
+            result = {
+                "error": "Unexpected error",
+                "url": slow_api_url,
+                "details": str(e),
+                "error_type": type(e).__name__
+            }
+            return jsonify(result), 500
+    
+    except Exception as e:
+        print(f"Slow call fault endpoint failed: {e}")
+        return jsonify({"error": "Slow call fault failed", "details": str(e)}), 500
+
 # Create tables
 def create_tables():
     """Create database tables"""

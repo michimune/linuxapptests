@@ -181,6 +181,37 @@ if not exist "BadScenarioLinux.csproj" (
     )
 )
 
+:: Restore, build and publish WebApiApp
+echo ========================================
+echo Restoring, building and publishing WebApiApp...
+echo ========================================
+cd /d "%BASE_DIR%WebApiApp"
+if not exist "WebApiApp.csproj" (
+    echo Warning: WebApiApp.csproj not found in %BASE_DIR%WebApiApp
+    echo Skipping WebApiApp build...
+) else (
+    echo Restoring WebApiApp...
+    dotnet restore
+    if %errorlevel% neq 0 (
+        echo Error: Failed to restore WebApiApp
+        exit /b 1
+    )
+
+    echo Building WebApiApp...
+    dotnet build --configuration Release
+    if %errorlevel% neq 0 (
+        echo Error: Failed to build WebApiApp
+        exit /b 1
+    )
+
+    echo Publishing WebApiApp...
+    dotnet publish --configuration Release --output "%BASE_DIR%WebApiApp\bin\Release\publish"
+    if %errorlevel% neq 0 (
+        echo Error: Failed to publish WebApiApp
+        exit /b 1
+    )
+)
+
 :: Run DeploySampleApps
 echo ========================================
 echo Running DeploySampleApps...
