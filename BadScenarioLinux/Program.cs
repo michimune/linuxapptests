@@ -938,7 +938,7 @@ public class IncorrectWriteAccessScenario : ScenarioBase
 {
     public override string Description => "Incorrect write access";
 
-    public override async Task Setup()
+    public override async Task Validate()
     {
         Console.WriteLine("Making HTTP request to trigger write access issue...");
         
