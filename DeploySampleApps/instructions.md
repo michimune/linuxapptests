@@ -7,7 +7,21 @@ DeploySampleApps is a C# console application that automates the deployment of Az
 ## Architecture & Design Principles
 
 ### Core Design Philosophy
-- **Azure SDK Best Practices**: Uses Azure Resource Manager SDK with proper authentication patterns
+- **Azure SDK Best Practices**: Uses Azure Resource Manager SDK wit### Future Enhancements
+
+### Potential Improvements
+- Azure Key Vault integration for secrets
+- Application Insights for advanced monitoring (in addition to Log Analytics)
+- Azure DevOps integration for CI/CD
+- ARM template generation option
+- Bicep template support
+- Configuration file support
+- Multiple application deployment (currently supports Python + .NET)
+- Blue-green deployment support
+- Container-based deployment options
+- Function App integration
+- API Management integration
+- Alert rules and monitoring dashboards based on Log Analytics datantication patterns
 - **Infrastructure as Code**: Programmatic deployment of complete Azure environments
 - **Automation First**: Minimal manual intervention required
 - **Robust Error Handling**: Comprehensive validation and retry logic
@@ -67,6 +81,7 @@ All Azure resources follow the pattern: `{resource-type}-{resource-name}`
 - **Web API App**: `webapi-{resource-name}`
 - **PostgreSQL Server**: `psql-{resource-name}`
 - **Private Endpoint**: `pe-postgresql-{resource-name}`
+- **Log Analytics Workspace**: `law-{resource-name}`
 
 ### Fixed Names
 - **App Service Subnet**: `subnet-appservice`
@@ -98,6 +113,13 @@ All Azure resources follow the pattern: `{resource-type}-{resource-name}`
 - **Public Access**: Disabled for security
 - **Connection**: Via private DNS resolution through VNet
 
+### Monitoring & Observability
+- **Log Analytics Workspace**: Centralized logging and monitoring platform
+- **Diagnostic Settings**: Configured for both Python and .NET web applications
+- **Log Categories**: All logs enabled (allLogs category group)
+- **Metrics**: All metrics enabled (AllMetrics category)
+- **Retention**: Log Analytics workspace with 30-day retention and 1GB daily quota limit
+
 ### Security Features
 - **Private Networking**: Database accessible only through private endpoint
 - **Random Password Generation**: 16-character secure passwords
@@ -117,6 +139,15 @@ All Azure resources follow the pattern: `{resource-type}-{resource-name}`
 
 ### Deployment Flow
 1. **Infrastructure Creation**: Complete Azure environment setup
+   - Resource Group creation
+   - Virtual Network with subnets and delegations
+   - Private DNS Zone for secure database connectivity
+   - PostgreSQL Flexible Server with private endpoint
+   - App Service Plan (Linux S1)
+   - Log Analytics Workspace for monitoring
+   - Web App and Web API App creation
+   - Diagnostic settings configuration for both applications
+   - VNet integration for both applications
 2. **Application Packaging**: ZIP file creation from source directories and published output
 3. **Python Web App Deployment**: 
    - Deploy main application to production slot
@@ -137,11 +168,13 @@ All Azure resources follow the pattern: `{resource-type}-{resource-name}`
 - **SCM_DO_BUILD_DURING_DEPLOYMENT**: Enables automatic builds during deployment
 - **WEBSITES_ENABLE_APP_SERVICE_STORAGE**: Disabled for containerized apps
 - **PRODUCTS_ENABLED**: Set to "1" for product functionality
+- **WEBAPI_URL**: URL of the Web API App for cross-application communication
 
 #### Web API App Settings
 - **DATABASE_URL**: PostgreSQL connection string with private endpoint
 - **ASPNETCORE_ENVIRONMENT**: Set to "Production"
 - **WEBSITES_ENABLE_APP_SERVICE_STORAGE**: Disabled for containerized apps
+- **APP_VALUE**: Set to "abcde" for application configuration
 
 ## Advanced Features
 
@@ -198,6 +231,7 @@ All Azure resources follow the pattern: `{resource-type}-{resource-name}`
 <PackageReference Include="Azure.ResourceManager.Network" Version="1.9.0" />
 <PackageReference Include="Azure.ResourceManager.PrivateDns" Version="1.2.0" />
 <PackageReference Include="Azure.ResourceManager.AppService" Version="1.2.0" />
+<PackageReference Include="Azure.ResourceManager.OperationalInsights" Version="1.3.0" />
 <PackageReference Include="Azure.Identity" Version="1.12.1" />
 ```
 
@@ -527,6 +561,11 @@ dotnet run 12345678-1234-1234-1234-123456789012 eastus C:\MyProjects mymarketing
 ## Version History
 
 ### Recent Updates
+- **HttpClient-Based Diagnostics**: Updated diagnostic settings configuration to use HttpClient for better reliability and control
+- **Simplified Dependencies**: Removed Azure.ResourceManager.Monitor package dependency in favor of direct REST API calls
+- **Log Analytics Integration**: Added Log Analytics workspace creation and diagnostic settings configuration
+- **Enhanced Monitoring**: Configured diagnostic settings for both Python and .NET web applications
+- **Improved Diagnostics**: Added comprehensive logging and metrics collection for App Service resources
 - **WebApiApp Integration**: Added support for .NET Web API applications
 - **Automated Setup**: Created setup.bat for complete automation
 - **Enhanced Security**: Removed @ character from password generation for compatibility

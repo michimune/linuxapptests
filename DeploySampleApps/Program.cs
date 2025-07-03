@@ -5,6 +5,8 @@ using Azure.ResourceManager.AppService;
 using Azure.ResourceManager.AppService.Models;
 using Azure.ResourceManager.Network;
 using Azure.ResourceManager.Network.Models;
+using Azure.ResourceManager.OperationalInsights;
+using Azure.ResourceManager.OperationalInsights.Models;
 using Azure.ResourceManager.PostgreSql;
 using Azure.ResourceManager.PostgreSql.FlexibleServers;
 using Azure.ResourceManager.PostgreSql.FlexibleServers.Models;
@@ -41,6 +43,7 @@ class Program
     private static string WebApiAppName => $"webapi-{ResourceName}";
     private static string PostgreSqlServerName => $"psql-{ResourceName}";
     private static string PrivateEndpointName => $"pe-postgresql-{ResourceName}";
+    private static string LogAnalyticsWorkspaceName => $"law-{ResourceName}";
 
     static async Task<int> Main(string[] args)
     {
@@ -68,6 +71,7 @@ class Program
             Console.WriteLine($"  Web API App: {WebApiAppName}");
             Console.WriteLine($"  PostgreSQL Server: {PostgreSqlServerName}");
             Console.WriteLine($"  Private Endpoint: {PrivateEndpointName}");
+            Console.WriteLine($"  Log Analytics Workspace: {LogAnalyticsWorkspaceName}");
             Console.WriteLine($"  Database Password: {DatabasePassword}");
             Console.WriteLine();
 
@@ -213,11 +217,20 @@ class Program
             // Create App Service Plan
             var appServicePlan = await CreateAppServicePlan(resourceGroup);
 
+            // Create Log Analytics Workspace
+            var logAnalyticsWorkspace = await CreateLogAnalyticsWorkspace(resourceGroup);
+
             // Create Web App
             var webApp = await CreateWebApp(resourceGroup, appServicePlan);
 
             // Create Web API App
             var webApiApp = await CreateWebApiApp(resourceGroup, appServicePlan);
+
+            // Configure diagnostic settings for Web App
+            await ConfigureDiagnosticSettings(webApp, logAnalyticsWorkspace);
+
+            // Configure diagnostic settings for Web API App
+            await ConfigureDiagnosticSettings(webApiApp, logAnalyticsWorkspace);
 
             // Configure VNet integration for Web App
             await ConfigureVNetIntegration(webApp, vnet);
@@ -464,6 +477,27 @@ class Program
         return appServicePlanLro.Value;
     }
 
+    private static async Task<OperationalInsightsWorkspaceResource> CreateLogAnalyticsWorkspace(ResourceGroupResource resourceGroup)
+    {
+        Console.WriteLine("Creating Log Analytics Workspace...");
+
+        var workspaceData = new OperationalInsightsWorkspaceData(Region)
+        {
+            Sku = new OperationalInsightsWorkspaceSku(OperationalInsightsWorkspaceSkuName.PerGB2018),
+            RetentionInDays = 30,
+            WorkspaceCapping = new OperationalInsightsWorkspaceCapping()
+            {
+                DailyQuotaInGB = 1.0
+            }
+        };
+
+        var workspaceLro = await resourceGroup.GetOperationalInsightsWorkspaces()
+            .CreateOrUpdateAsync(Azure.WaitUntil.Completed, LogAnalyticsWorkspaceName, workspaceData);
+
+        Console.WriteLine($"Created Log Analytics Workspace: {LogAnalyticsWorkspaceName}");
+        return workspaceLro.Value;
+    }
+
     private static async Task<WebSiteResource> CreateWebApp(ResourceGroupResource resourceGroup, 
         AppServicePlanResource appServicePlan)
     {
@@ -506,6 +540,80 @@ class Program
 
         Console.WriteLine($"Created Web API App: {WebApiAppName}");
         return webApiAppLro.Value;
+    }
+
+    private static async Task ConfigureDiagnosticSettings(WebSiteResource webApp, OperationalInsightsWorkspaceResource logAnalyticsWorkspace)
+    {
+        Console.WriteLine($"Configuring diagnostic settings for {webApp.Data.Name}...");
+
+        try
+        {
+            using var httpClient = new HttpClient();
+            
+            // Use Azure Management token
+            var token = await GetAzureManagementTokenAsync();
+            httpClient.DefaultRequestHeaders.Authorization = 
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            // Create diagnostic settings data structure
+            var diagnosticSettingsData = new
+            {
+                properties = new
+                {
+                    workspaceId = logAnalyticsWorkspace.Id.ToString(),
+                    logs = new[]
+                    {
+                        new
+                        {
+                            categoryGroup = "allLogs",
+                            enabled = true,
+                            retentionPolicy = new
+                            {
+                                enabled = false,
+                                days = 0
+                            }
+                        }
+                    },
+                    metrics = new[]
+                    {
+                        new
+                        {
+                            category = "AllMetrics",
+                            enabled = true,
+                            retentionPolicy = new
+                            {
+                                enabled = false,
+                                days = 0
+                            }
+                        }
+                    }
+                }
+            };
+
+            var jsonContent = JsonSerializer.Serialize(diagnosticSettingsData);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+            // Use the diagnostic settings API endpoint
+            var diagnosticSettingsName = "default";
+            var apiUrl = $"https://management.azure.com{webApp.Id}/providers/Microsoft.Insights/diagnosticSettings/{diagnosticSettingsName}?api-version=2021-05-01-preview";
+
+            var response = await httpClient.PutAsync(apiUrl, content);
+
+            if (response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"✓ Configured diagnostic settings for {webApp.Data.Name}");
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"Warning: Failed to configure diagnostic settings for {webApp.Data.Name}");
+                Console.WriteLine($"Status: {response.StatusCode}, Error: {errorContent}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: Could not configure diagnostic settings for {webApp.Data.Name}: {ex.Message}");
+        }
     }
 
     private static async Task ConfigureVNetIntegration(WebSiteResource webApp, VirtualNetworkResource vnet)
