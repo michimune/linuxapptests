@@ -29,6 +29,13 @@ app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = secret_key
 
+# Wait 5 seconds before continuing initialization
+import time
+print("Starting application...")
+print("Waiting 5 seconds before initialization...")
+time.sleep(5)
+print("Initialization starting...")
+
 db = SQLAlchemy(app)
 
 # Database Models

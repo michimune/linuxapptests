@@ -1578,3 +1578,292 @@ public class PoorlyTunedAutoHealRulesScenario : ScenarioBase
         }
     }
 }
+
+[Scenario]
+public class ColdStartsAfterScaleOutScenario : ScenarioBase
+{
+    public override string Description => "Cold starts after scale-out";
+    private int _originalInstanceCount;
+
+    public override async Task Setup()
+    {
+        Console.WriteLine("Scaling out to 2 instances...");
+        
+        try
+        {
+            // Get the App Service Plan resource to read current configuration
+            var subscription = ArmClient!.GetSubscriptionResource(ResourceIdentifier.Parse($"/subscriptions/{SubscriptionId}"));
+            var resourceGroup = await subscription.GetResourceGroupAsync(ResourceGroupName);
+            var appServicePlan = await resourceGroup.Value.GetAppServicePlanAsync(AppServicePlanName);
+            
+            // Save the original instance count and SKU details
+            _originalInstanceCount = appServicePlan.Value.Data.Sku?.Capacity ?? 1;
+            Console.WriteLine($"Original instance count: {_originalInstanceCount}");
+            Console.WriteLine($"Current SKU: {appServicePlan.Value.Data.Sku?.Name} ({appServicePlan.Value.Data.Sku?.Tier})");
+            
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // First, disable client affinity (sticky sessions) to ensure requests can hit different instances
+            Console.WriteLine("Disabling client affinity (sticky sessions) to allow requests to hit different instances...");
+            var webAppResourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var webAppConfigUrl = $"https://management.azure.com{webAppResourceId}?api-version=2022-03-01";
+            
+            // Create the web app configuration JSON to disable client affinity
+            var webAppConfig = new
+            {
+                properties = new
+                {
+                    clientAffinityEnabled = false
+                }
+            };
+            
+            var webAppJsonContent = JsonSerializer.Serialize(webAppConfig);
+            Console.WriteLine($"Web app configuration: {webAppJsonContent}");
+            
+            // Create HTTP client with authentication
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Make the PATCH request to disable client affinity
+            var webAppContent = new StringContent(webAppJsonContent, System.Text.Encoding.UTF8, "application/json");
+            var webAppResponse = await httpClient.PatchAsync(webAppConfigUrl, webAppContent);
+            
+            if (webAppResponse.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"✓ Successfully disabled client affinity (Status: {(int)webAppResponse.StatusCode})");
+            }
+            else
+            {
+                var errorContent = await webAppResponse.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to disable client affinity (Status: {(int)webAppResponse.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Continuing with scaling anyway...");
+            }
+            
+            // Now proceed with scaling the App Service Plan
+            Console.WriteLine("Proceeding with App Service Plan scaling...");
+            
+            // Construct the resource ID and API URL
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/serverfarms/{AppServicePlanName}";
+            var scaleUrl = $"https://management.azure.com{resourceId}?api-version=2022-03-01";
+            
+            Console.WriteLine($"Scaling App Service Plan via PATCH to: {scaleUrl}");
+            
+            // Create the scaling configuration JSON
+            var scaleConfig = new
+            {
+                properties = new
+                {
+                    elasticScaleEnabled = false,
+                    zoneRedundant = false
+                },
+                sku = new
+                {
+                    name = appServicePlan.Value.Data.Sku?.Name ?? "S1",
+                    tier = appServicePlan.Value.Data.Sku?.Tier ?? "Standard",
+                    size = appServicePlan.Value.Data.Sku?.Size ?? "S1",
+                    family = appServicePlan.Value.Data.Sku?.Family ?? "S",
+                    capacity = 2
+                }
+            };
+            
+            var jsonContent = JsonSerializer.Serialize(scaleConfig);
+            Console.WriteLine($"Scale-out configuration: {jsonContent}");
+            
+            // Make the PATCH request to scale out
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PatchAsync(scaleUrl, content);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"✓ Successfully scaled out to 2 instances (Status: {(int)response.StatusCode})");
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to scale out App Service Plan (Status: {(int)response.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Falling back to simulation...");
+                await SetAppSetting("_SCENARIO_SCALED_OUT", "true");
+            }
+            
+            // Wait for scaling to complete
+            Console.WriteLine("Waiting 60 seconds for scaling to complete...");
+            await Task.Delay(60000);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error scaling out App Service Plan: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await SetAppSetting("_SCENARIO_SCALED_OUT", "true");
+            _originalInstanceCount = 1; // Assume original was 1
+        }
+    }
+
+    public override async Task Validate()
+    {
+        Console.WriteLine("Making HTTP requests every second for 2 minutes to measure latency and detect cold starts...");
+        
+        var coldStartThreshold = 5000; // 5 seconds
+        var totalRequests = 120; // 2 minutes * 60 seconds / 1 second interval
+        var coldStarts = new List<(int requestNumber, long latencyMs)>();
+        var errors = new List<(int requestNumber, string error)>();
+        
+        for (int i = 1; i <= totalRequests; i++)
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            
+            try
+            {
+                var response = await HttpClient.GetAsync(TargetAddress);
+                stopwatch.Stop();
+                
+                var latencyMs = stopwatch.ElapsedMilliseconds;
+                
+                if (latencyMs > coldStartThreshold)
+                {
+                    coldStarts.Add((i, latencyMs));
+                    Console.WriteLine($"⚠️  Request {i}: Cold start detected - {latencyMs}ms (> {coldStartThreshold}ms threshold)");
+                }
+                else if (latencyMs > 1000) // Log slower requests but not cold starts
+                {
+                    Console.WriteLine($"Request {i}: Slow response - {latencyMs}ms");
+                }
+                else if (i % 10 == 0) // Log every 10th request for progress
+                {
+                    Console.WriteLine($"Request {i}: {latencyMs}ms");
+                }
+                
+                if (!response.IsSuccessStatusCode)
+                {
+                    errors.Add((i, $"HTTP {(int)response.StatusCode}"));
+                    Console.WriteLine($"⚠️  Request {i}: HTTP error {(int)response.StatusCode}");
+                }
+            }
+            catch (Exception ex)
+            {
+                stopwatch.Stop();
+                var latencyMs = stopwatch.ElapsedMilliseconds;
+                errors.Add((i, ex.Message));
+                Console.WriteLine($"⚠️  Request {i}: Exception after {latencyMs}ms - {ex.Message}");
+            }
+            
+            // Wait 1 second before next request (except for the last request)
+            if (i < totalRequests)
+            {
+                await Task.Delay(1000);
+            }
+        }
+        
+        // Summary report
+        Console.WriteLine("\n--- Cold Start Analysis Summary ---");
+        Console.WriteLine($"Total requests: {totalRequests}");
+        Console.WriteLine($"Cold starts detected: {coldStarts.Count} (threshold: {coldStartThreshold}ms)");
+        Console.WriteLine($"Errors encountered: {errors.Count}");
+        
+        if (coldStarts.Count > 0)
+        {
+            Console.WriteLine($"✓ Cold starts detected - scale-out caused latency issues:");
+            foreach (var (requestNumber, latencyMs) in coldStarts)
+            {
+                Console.WriteLine($"  - Request {requestNumber}: {latencyMs}ms");
+            }
+        }
+        else
+        {
+            Console.WriteLine("✓ No cold starts detected within the threshold");
+        }
+        
+        if (errors.Count > 0)
+        {
+            Console.WriteLine($"✓ Errors detected during scale-out:");
+            foreach (var (requestNumber, error) in errors)
+            {
+                Console.WriteLine($"  - Request {requestNumber}: {error}");
+            }
+        }
+        else
+        {
+            Console.WriteLine("✓ No errors detected during testing");
+        }
+    }
+
+    public override async Task Recover()
+    {
+        Console.WriteLine($"Scaling back to {_originalInstanceCount} instance(s)...");
+        
+        try
+        {
+            // Get the App Service Plan resource to read current configuration
+            var subscription = ArmClient!.GetSubscriptionResource(ResourceIdentifier.Parse($"/subscriptions/{SubscriptionId}"));
+            var resourceGroup = await subscription.GetResourceGroupAsync(ResourceGroupName);
+            var appServicePlan = await resourceGroup.Value.GetAppServicePlanAsync(AppServicePlanName);
+            
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // Construct the resource ID and API URL
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/serverfarms/{AppServicePlanName}";
+            var scaleUrl = $"https://management.azure.com{resourceId}?api-version=2022-03-01";
+            
+            Console.WriteLine($"Scaling App Service Plan back via PATCH to: {scaleUrl}");
+            
+            // Create the scaling configuration JSON to restore original instance count
+            var scaleConfig = new
+            {
+                properties = new
+                {
+                    elasticScaleEnabled = false,
+                    zoneRedundant = false
+                },
+                sku = new
+                {
+                    name = appServicePlan.Value.Data.Sku?.Name ?? "S1",
+                    tier = appServicePlan.Value.Data.Sku?.Tier ?? "Standard",
+                    size = appServicePlan.Value.Data.Sku?.Size ?? "S1",
+                    family = appServicePlan.Value.Data.Sku?.Family ?? "S",
+                    capacity = _originalInstanceCount
+                }
+            };
+            
+            var jsonContent = JsonSerializer.Serialize(scaleConfig);
+            Console.WriteLine($"Scale-back configuration: {jsonContent}");
+            
+            // Create HTTP client with authentication
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Make the PATCH request
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PatchAsync(scaleUrl, content);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"✓ Successfully scaled back to {_originalInstanceCount} instance(s) (Status: {(int)response.StatusCode})");
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to scale back App Service Plan (Status: {(int)response.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Falling back to simulation...");
+                await RemoveAppSetting("_SCENARIO_SCALED_OUT");
+            }
+            
+            // Wait for scaling to complete
+            Console.WriteLine("Waiting 60 seconds for scaling to complete...");
+            await Task.Delay(60000);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error scaling back App Service Plan: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await RemoveAppSetting("_SCENARIO_SCALED_OUT");
+        }
+    }
+}
