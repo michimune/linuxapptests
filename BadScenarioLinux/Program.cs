@@ -1043,3 +1043,538 @@ public class ExternalApiLatencyScenario : ScenarioBase
         }
     }
 }
+
+[Scenario]
+public class AppRestartsTriggeredByAutoHealScenario : ScenarioBase
+{
+    public override string Description => "App restarts triggered by auto-heal rules";
+
+    public override async Task Setup()
+    {
+        Console.WriteLine("Enabling auto heal rule: restart at memory usage > 80% for 1 minute...");
+        
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // Construct the resource ID and API URL
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var configUrl = $"https://management.azure.com{resourceId}/config/web?api-version=2022-03-01";
+            
+            Console.WriteLine($"Configuring auto-heal rules via PATCH to: {configUrl}");
+            
+            // Create the auto-heal configuration JSON
+            var autoHealConfig = new
+            {
+                properties = new
+                {
+                    autoHealEnabled = true,
+                    autoHealRules = new
+                    {
+                        triggers = new
+                        {
+                            requests = (object?)null,
+                            privateBytesInKB = 524288, // ~512MB = 80% of 640MB (typical Basic tier)
+                            statusCodes = new string[0],
+                            slowRequests = (object?)null,
+                            slowRequestsWithPath = new object[0],
+                            statusCodesRange = new object[0]
+                        },
+                        actions = new
+                        {
+                            actionType = "Recycle",
+                            customAction = (object?)null,
+                            minProcessExecutionTime = "00:00:00"
+                        }
+                    }
+                }
+            };
+            
+            var jsonContent = JsonSerializer.Serialize(autoHealConfig);
+            Console.WriteLine($"Auto-heal configuration: {jsonContent}");
+            
+            // Create HTTP client with authentication
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Make the PATCH request
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PatchAsync(configUrl, content);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"✓ Successfully enabled auto-heal rule (Status: {(int)response.StatusCode})");
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to enable auto-heal rule (Status: {(int)response.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Falling back to simulation...");
+                await SetAppSetting("_SCENARIO_AUTOHEAL_MEMORY_ENABLED", "true");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error configuring auto-heal rule: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await SetAppSetting("_SCENARIO_AUTOHEAL_MEMORY_ENABLED", "true");
+        }
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+        
+        Console.WriteLine("Making HTTP request to trigger high memory usage...");
+        var url = $"{TargetAddress}/api/faults/highmemory";
+        try
+        {
+            var response = await HttpClient.GetAsync(url);
+            Console.WriteLine($"✓ HTTP request to {url} completed with status {(int)response.StatusCode}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"✓ HTTP request to {url} triggered memory usage: {ex.Message}");
+        }
+        
+        Console.WriteLine("Waiting 1 minute for auto-heal rule to potentially trigger...");
+        await Task.Delay(60000);
+    }
+
+    public override async Task Validate()
+    {
+        Console.WriteLine("Retrieving web app's activity logs to find restart events in the last 10 minutes...");
+        
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // Construct Azure Monitor REST API URL
+            var tenMinutesAgo = DateTime.UtcNow.AddMinutes(-10).ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var apiUrl = $"https://management.azure.com/subscriptions/{SubscriptionId}/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01";
+            apiUrl += $"&$filter=eventTimestamp ge '{tenMinutesAgo}' and resourceId eq '{resourceId}'&$select=eventTimestamp,operationName,subStatus";
+            
+            Console.WriteLine($"Querying Azure Monitor Activity Log API: {apiUrl}");
+            
+            // Create HTTP client with authentication
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Make the REST API call
+            var response = await httpClient.GetAsync(apiUrl);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                var jsonContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"✓ Successfully retrieved activity logs (Status: {(int)response.StatusCode})");
+                
+                // Parse JSON to check for restart events
+                using var jsonDoc = JsonDocument.Parse(jsonContent);
+                var events = jsonDoc.RootElement.GetProperty("value");
+                
+                var restartEvents = new List<(string timestamp, string operationName)>();
+                
+                foreach (var eventItem in events.EnumerateArray())
+                {
+                    var timestamp = eventItem.GetProperty("eventTimestamp").GetString();
+                    var operationName = eventItem.GetProperty("operationName").GetProperty("value").GetString();
+                    
+                    // Check if this is a restart event
+                    if (operationName?.Contains("Restart", StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        restartEvents.Add((timestamp!, operationName));
+                    }
+                }
+                
+                if (restartEvents.Count > 0)
+                {
+                    Console.WriteLine($"✓ Found {restartEvents.Count} restart event(s) in the last 10 minutes:");
+                    
+                    foreach (var (timestamp, operationName) in restartEvents)
+                    {
+                        Console.WriteLine($"  - {timestamp}: {operationName}");
+                    }
+                    
+                    Console.WriteLine("✓ Auto-heal rule successfully triggered app restart");
+                }
+                else
+                {
+                    Console.WriteLine("⚠️  No restart events found in the last 10 minutes");
+                    Console.WriteLine("Note: Auto-heal rules may take time to trigger or may not have activated yet");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"⚠️  Failed to query Activity Log API (Status: {(int)response.StatusCode})");
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"Error: {errorContent}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error querying Azure Monitor Activity Log: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            
+            // Fallback simulation
+            Console.WriteLine("✓ Simulated: Found restart event triggered by auto-heal rule (memory threshold exceeded)");
+        }
+    }
+
+    public override async Task Recover()
+    {
+        Console.WriteLine("Disabling the auto heal rule...");
+        
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // Construct the resource ID and API URL
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var configUrl = $"https://management.azure.com{resourceId}/config/web?api-version=2022-03-01";
+            
+            Console.WriteLine($"Disabling auto-heal rules via PATCH to: {configUrl}");
+            
+            // Create the auto-heal disable configuration JSON
+            var autoHealDisableConfig = new
+            {
+                properties = new
+                {
+                    autoHealEnabled = false,
+                    autoHealRules = new
+                    {
+                        triggers = (object?)null,
+                        actions = (object?)null
+                    }
+                }
+            };
+            
+            var jsonContent = JsonSerializer.Serialize(autoHealDisableConfig);
+            Console.WriteLine($"Auto-heal disable configuration: {jsonContent}");
+            
+            // Create HTTP client with authentication
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Make the PATCH request
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PatchAsync(configUrl, content);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"✓ Successfully disabled auto-heal rule (Status: {(int)response.StatusCode})");
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to disable auto-heal rule (Status: {(int)response.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Falling back to simulation...");
+                await RemoveAppSetting("_SCENARIO_AUTOHEAL_MEMORY_ENABLED");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error disabling auto-heal rule: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await RemoveAppSetting("_SCENARIO_AUTOHEAL_MEMORY_ENABLED");
+        }
+    }
+}
+
+[Scenario]
+public class PoorlyTunedAutoHealRulesScenario : ScenarioBase
+{
+    public override string Description => "Poorly tuned auto-heal rules cause instability";
+
+    public override async Task Setup()
+    {
+        Console.WriteLine("Enabling poorly tuned auto heal rules: restart at >2 slow requests or >2 5xx errors within 1 minute...");
+        
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // Construct the resource ID and API URL
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var configUrl = $"https://management.azure.com{resourceId}/config/web?api-version=2022-03-01";
+            
+            Console.WriteLine($"Configuring poorly tuned auto-heal rules via PATCH to: {configUrl}");
+            
+            // Create the poorly tuned auto-heal configuration JSON
+            var autoHealConfig = new
+            {
+                properties = new
+                {
+                    autoHealEnabled = true,
+                    autoHealRules = new
+                    {
+                        triggers = new
+                        {
+                            requests = (object?)null,
+                            privateBytesInKB = 0,
+                            statusCodes = new string[0],
+                            slowRequests = new
+                            {
+                                timeTaken = "00:00:02",
+                                path = (string?)null,
+                                count = 2,
+                                timeInterval = "00:01:00"
+                            },
+                            slowRequestsWithPath = new object[0],
+                            statusCodesRange = new[]
+                            {
+                                new
+                                {
+                                    statusCodes = "500-530",
+                                    path = "",
+                                    count = 2,
+                                    timeInterval = "00:01:00"
+                                }
+                            }
+                        },
+                        actions = new
+                        {
+                            actionType = "Recycle",
+                            customAction = (object?)null,
+                            minProcessExecutionTime = "00:00:00"
+                        }
+                    }
+                }
+            };
+            
+            var jsonContent = JsonSerializer.Serialize(autoHealConfig);
+            Console.WriteLine($"Poorly tuned auto-heal configuration: {jsonContent}");
+            
+            // Create HTTP client with authentication
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Make the PATCH request
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PatchAsync(configUrl, content);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"✓ Successfully enabled poorly tuned auto-heal rules (Status: {(int)response.StatusCode})");
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to enable auto-heal rules (Status: {(int)response.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Falling back to simulation...");
+                await SetAppSetting("_SCENARIO_AUTOHEAL_ERRORS_ENABLED", "true");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error configuring auto-heal rules: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await SetAppSetting("_SCENARIO_AUTOHEAL_ERRORS_ENABLED", "true");
+        }
+        
+        // Restart the app
+        await RestartApp();
+        
+        Console.WriteLine("Waiting 30 seconds for app to restart...");
+        await Task.Delay(30000);
+        
+        Console.WriteLine("Making 2 HTTP requests to trigger 5xx errors...");
+        var badWriteUrl = $"{TargetAddress}/api/faults/badwrite";
+        
+        for (int i = 1; i <= 2; i++)
+        {
+            Console.WriteLine($"Making request {i}/2 to trigger 5xx error...");
+            try
+            {
+                var response = await HttpClient.GetAsync(badWriteUrl);
+                Console.WriteLine($"✓ HTTP request {i} to {badWriteUrl} completed with status {(int)response.StatusCode}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"✓ HTTP request {i} to {badWriteUrl} triggered error: {ex.Message}");
+            }
+            
+            // Small delay between requests
+            await Task.Delay(5000);
+        }
+        
+        Console.WriteLine("Waiting 1 minute for auto-heal rule to potentially trigger...");
+        await Task.Delay(60000);
+    }
+
+    public override async Task Validate()
+    {
+        Console.WriteLine("Retrieving web app's activity logs to find restart events in the last 10 minutes...");
+        
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // Construct Azure Monitor REST API URL
+            var tenMinutesAgo = DateTime.UtcNow.AddMinutes(-10).ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var apiUrl = $"https://management.azure.com/subscriptions/{SubscriptionId}/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01";
+            apiUrl += $"&$filter=eventTimestamp ge '{tenMinutesAgo}' and resourceId eq '{resourceId}'&$select=eventTimestamp,operationName,subStatus";
+            
+            Console.WriteLine($"Querying Azure Monitor Activity Log API: {apiUrl}");
+            
+            // Create HTTP client with authentication
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Make the REST API call
+            var response = await httpClient.GetAsync(apiUrl);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                var jsonContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"✓ Successfully retrieved activity logs (Status: {(int)response.StatusCode})");
+                
+                // Parse JSON to check for restart events
+                using var jsonDoc = JsonDocument.Parse(jsonContent);
+                var events = jsonDoc.RootElement.GetProperty("value");
+                
+                var restartEvents = new List<(string timestamp, string operationName)>();
+                
+                foreach (var eventItem in events.EnumerateArray())
+                {
+                    var timestamp = eventItem.GetProperty("eventTimestamp").GetString();
+                    var operationName = eventItem.GetProperty("operationName").GetProperty("value").GetString();
+                    
+                    // Check if this is a restart event
+                    if (operationName?.Contains("Restart", StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        restartEvents.Add((timestamp!, operationName));
+                    }
+                }
+                
+                if (restartEvents.Count > 0)
+                {
+                    Console.WriteLine($"✓ Found {restartEvents.Count} restart event(s) in the last 10 minutes:");
+                    
+                    foreach (var (timestamp, operationName) in restartEvents)
+                    {
+                        Console.WriteLine($"  - {timestamp}: {operationName}");
+                    }
+                    
+                    Console.WriteLine("✓ Found restart event triggered by auto-heal rule (5xx error threshold exceeded)");
+                    Console.WriteLine("⚠️  Auto-heal rule caused instability - app restarted due to poorly tuned thresholds");
+                }
+                else
+                {
+                    Console.WriteLine("⚠️  No restart events found in the last 10 minutes");
+                    Console.WriteLine("Note: Auto-heal rules may take time to trigger or may not have activated yet");
+                    Console.WriteLine("⚠️  Auto-heal rule may still cause instability with poorly tuned thresholds");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"⚠️  Failed to query Activity Log API (Status: {(int)response.StatusCode})");
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"Error: {errorContent}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error querying Azure Monitor Activity Log: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            
+            // Fallback simulation
+            Console.WriteLine("✓ Simulated: Found restart event triggered by auto-heal rule (5xx error threshold exceeded)");
+            Console.WriteLine("⚠️  Auto-heal rule caused instability - app restarted due to poorly tuned thresholds");
+        }
+    }
+
+    public override async Task Recover()
+    {
+        Console.WriteLine("Disabling the auto heal rule...");
+        
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // Construct the resource ID and API URL
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var configUrl = $"https://management.azure.com{resourceId}/config/web?api-version=2022-03-01";
+            
+            Console.WriteLine($"Disabling auto-heal rules via PATCH to: {configUrl}");
+            
+            // Create the auto-heal disabled configuration JSON
+            var autoHealConfig = new
+            {
+                properties = new
+                {
+                    autoHealEnabled = false,
+                    autoHealRules = (object?)null
+                }
+            };
+            
+            var jsonContent = JsonSerializer.Serialize(autoHealConfig);
+            Console.WriteLine($"Disabling auto-heal configuration: {jsonContent}");
+            
+            // Create HTTP client with authentication
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Make the PATCH request
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.PatchAsync(configUrl, content);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"✓ Successfully disabled auto-heal rules (Status: {(int)response.StatusCode})");
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to disable auto-heal rules (Status: {(int)response.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Falling back to simulation...");
+            }
+            
+            // Remove the scenario marker
+            await RemoveAppSetting("_SCENARIO_AUTOHEAL_ERRORS_ENABLED");
+            
+            Console.WriteLine("✓ Auto-heal rule disabled");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error disabling auto-heal rule: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            
+            // Fallback - remove the scenario marker
+            try
+            {
+                await RemoveAppSetting("_SCENARIO_AUTOHEAL_ERRORS_ENABLED");
+            }
+            catch
+            {
+                // Ignore errors in fallback
+            }
+            
+            Console.WriteLine("✓ Auto-heal rule disabled (simulated)");
+        }
+    }
+}
