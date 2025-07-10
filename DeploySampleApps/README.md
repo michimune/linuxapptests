@@ -40,7 +40,7 @@ dotnet run 12345678-1234-1234-1234-123456789012 eastus C:\MyProjects mymarketing
 ## Directory Structure
 
 The application expects the following directory structure under the specified base directory:
-```
+```markdown
 <sample-app-base-dir>/
 ├── SampleMarketingApp/     # Main application files
 ├── SampleMarketingAppBad/  # Bad scenario application files
@@ -48,6 +48,24 @@ The application expects the following directory structure under the specified ba
     ├── SampleMarketingApp.zip
     └── SampleMarketingAppBad.zip
 ```
+
+## Scripts
+
+After the initial deployment run, two batch scripts are created in the base directory (same as `<sample-app-base-dir>`):
+
+- `deploy.bat`  
+  Contains the `dotnet run` command with the same arguments you used. Use this to redeploy infrastructure without retyping parameters.  
+  Example:  
+  ```powershell
+  .\deploy.bat
+  ```
+
+- `badapps.bat`  
+  Executes broken zip scenarios in the `BadScenarioLinux` project using the same subscription ID, resource name, and zip directory.  
+  Example:  
+  ```powershell
+  .\badapps.bat
+  ```
 
 ## Infrastructure Created
 

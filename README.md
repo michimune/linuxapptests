@@ -33,4 +33,5 @@ This repository has projects that allow you to automatically create a test envir
 ## Notes
 
 - `badapps.bat` will be created after setup.bat is successfully finished.
+- `deploy.bat` will be created alongside `badapps.bat` and can be used to rerun the infrastructure deployment with the same parameters without retyping them.
 - If you encounter a quota error, try a different region (e.g. brazilsouth).
