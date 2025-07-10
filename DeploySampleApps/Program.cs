@@ -91,10 +91,12 @@ class Program
                 Console.Error.WriteLine($"Error: SampleMarketingApp directory not found at: {sampleMarketingAppPath}");
                 return 1;            }
 
-            CreateSampleAppsZipFiles();
+            var zipDir = CreateSampleAppsZipFiles();
+            // Add call to generate deploy script
+            CreateDeployScript(args);
 
             // Create the batch script
-            CreateBatchScript();
+            CreateBatchScript(zipDir);
 
             // Initialize Azure client
             _armClient = new ArmClient(new DefaultAzureCredential());
@@ -114,7 +116,7 @@ class Program
             return 1;
         }    }
 
-    private static void CreateSampleAppsZipFiles()
+    private static string CreateSampleAppsZipFiles()
     {
         // Validate required directories exist under base directory
         var sampleMarketingAppPath = Path.Combine(SampleAppBaseDir, "SampleMarketingApp");
@@ -146,7 +148,7 @@ class Program
         }
 
         // Create zip directory
-        var zipDir = Path.Combine(SampleAppBaseDir, "zip");
+        var zipDir = Path.GetFullPath(Path.Combine(SampleAppBaseDir, "zip"));
         if (!Directory.Exists(zipDir))
         {
             Directory.CreateDirectory(zipDir);
@@ -162,6 +164,10 @@ class Program
         CreateZipFile(sampleMarketingAppPath, sampleMarketingAppZip);
         CreateZipFile(sampleMarketingAppBadPath, sampleMarketingAppBadZip);
         
+        // Create truncated version of SampleMarketingApp.zip
+        var sampleMarketingAppTruncatedZip = Path.Combine(zipDir, "SampleMarketingAppTruncated.zip");
+        CreateTruncatedZipFile(sampleMarketingAppZip, sampleMarketingAppTruncatedZip);
+        
         // Create WebApiApp zip from published output
         var webApiAppPublishPath = Path.Combine(SampleAppBaseDir, "WebApiApp", "bin", "Release", "publish");
         if (Directory.Exists(webApiAppPublishPath))
@@ -173,6 +179,8 @@ class Program
             Console.WriteLine($"Warning: WebApiApp publish directory not found at: {webApiAppPublishPath}");
             Console.WriteLine("Make sure to build and publish WebApiApp before running this deployment");
         }
+        
+        return zipDir;
     }
 
     private static void CreateZipFile(string sourceDirectory, string zipFileName)
@@ -184,6 +192,22 @@ class Program
 
         ZipFile.CreateFromDirectory(sourceDirectory, zipFileName);
         Console.WriteLine($"Created {zipFileName}");
+    }
+
+    private static void CreateTruncatedZipFile(string sourceZipFileName, string truncatedZipFileName)
+    {
+        if (File.Exists(truncatedZipFileName))
+        {
+            File.Delete(truncatedZipFileName);
+        }
+
+        // Read the original zip file and create a truncated version (first half)
+        var originalBytes = File.ReadAllBytes(sourceZipFileName);
+        var truncatedBytes = new byte[originalBytes.Length / 2];
+        Array.Copy(originalBytes, truncatedBytes, truncatedBytes.Length);
+        
+        File.WriteAllBytes(truncatedZipFileName, truncatedBytes);
+        Console.WriteLine($"Created truncated zip file: {truncatedZipFileName} ({truncatedBytes.Length} bytes from {originalBytes.Length} bytes)");
     }
 
     private static async Task DeployInfrastructure()
@@ -818,17 +842,29 @@ class Program
             }
         }    }
 
-    private static void CreateBatchScript()
+    private static void CreateBatchScript(string zipDir)
     {
         Console.WriteLine("Creating batch script...");
           var batchScript = $@"@echo off
 echo Running BadScenarioLinux for {ResourceName}
-dotnet run --project BadScenarioLinux\BadScenarioLinux.csproj {SubscriptionId} {ResourceName}
+dotnet run --project BadScenarioLinux\BadScenarioLinux.csproj {SubscriptionId} {ResourceName} {zipDir}
 ";
 
         var batchScriptPath = Path.Combine(SampleAppBaseDir, "badapps.bat");
         File.WriteAllText(batchScriptPath, batchScript);
         Console.WriteLine($"Created badapps.bat at: {batchScriptPath}");
+    }
+
+    private static void CreateDeployScript(string[] args)
+    {
+        Console.WriteLine("Creating deploy script...");
+        var deployScript = $@"@echo off
+" +
+                        $"echo Deploying infrastructure for {ResourceName}\r\n" +
+                        $"dotnet run --project DeploySampleApps\\DeploySampleApps.csproj {string.Join(" ", args)}\r\n";
+        var deployScriptPath = Path.Combine(SampleAppBaseDir, "deploy.bat");
+        File.WriteAllText(deployScriptPath, deployScript);
+        Console.WriteLine($"Created deploy.bat at: {deployScriptPath}");
     }
 
     private static async Task<string> GetAzureManagementTokenAsync()

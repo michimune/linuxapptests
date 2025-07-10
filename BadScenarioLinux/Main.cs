@@ -17,6 +17,7 @@ public class Program
     private static ArmClient? _armClient;
     private static string? _resourceName;
     private static string? _subscriptionId;
+    private static string? _zipDirectory;
     
     // Resource name properties
     private static string ResourceGroupName => $"rg-{_resourceName}";
@@ -30,16 +31,24 @@ public class Program
 
     public static async Task Main(string[] args)
     {
-        if (args.Length < 2)
+        if (args.Length < 3)
         {
-            Console.WriteLine("Error: Both subscription ID and resource name are required.");
-            Console.WriteLine("Usage: dotnet run <subscription-id> <resource-name>");
-            Console.WriteLine("Example: dotnet run 12345678-1234-1234-1234-123456789012 mymarketingapp");
+            Console.WriteLine("Error: Subscription ID, resource name, and zip directory are required.");
+            Console.WriteLine("Usage: dotnet run <subscription-id> <resource-name> <zip-directory>");
+            Console.WriteLine("Example: dotnet run 12345678-1234-1234-1234-123456789012 mymarketingapp C:\\MyApps\\zip");
             Environment.Exit(1);
         }
 
         _subscriptionId = args[0];
         _resourceName = args[1];
+        _zipDirectory = args[2];
+
+        // Validate zip directory exists
+        if (!Directory.Exists(_zipDirectory))
+        {
+            Console.WriteLine($"Error: Zip directory not found: {_zipDirectory}");
+            Environment.Exit(1);
+        }
 
         try
         {
@@ -130,7 +139,7 @@ public class Program
 
     private static async Task ExecuteScenario(ScenarioBase scenario)
     {
-        scenario.Initialize(_armClient!, _resourceName!, _subscriptionId!);
+        scenario.Initialize(_armClient!, _resourceName!, _subscriptionId!, _zipDirectory!);
         
         Console.WriteLine($"\nExecuting scenario: {scenario.Description}");
         Console.WriteLine(new string('-', 50));
@@ -179,6 +188,7 @@ public abstract class ScenarioBase
     protected ArmClient? ArmClient { get; private set; }
     protected string? ResourceName { get; private set; }
     protected string? SubscriptionId { get; private set; }
+    protected string? ZipDirectory { get; private set; }
     protected HttpClient HttpClient { get; private set; } = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
     
     public abstract string Description { get; }
@@ -194,11 +204,12 @@ public abstract class ScenarioBase
     protected string PostgreSqlServerName => $"psql-{ResourceName}";
     protected string PrivateEndpointName => $"pe-postgresql-{ResourceName}";
 
-    public void Initialize(ArmClient armClient, string resourceName, string subscriptionId)
+    public void Initialize(ArmClient armClient, string resourceName, string subscriptionId, string zipDirectory)
     {
         ArmClient = armClient;
         ResourceName = resourceName;
         SubscriptionId = subscriptionId;
+        ZipDirectory = zipDirectory;
     }
 
     public virtual async Task Prevalidate()
@@ -1865,5 +1876,77 @@ public class ColdStartsAfterScaleOutScenario : ScenarioBase
             Console.WriteLine("Falling back to simulation...");
             await RemoveAppSetting("_SCENARIO_SCALED_OUT");
         }
+    }
+}
+
+[Scenario]
+public class PublishBrokenZipFileScenario : ScenarioBase
+{
+    public override string Description => "Publish broken zip file";
+
+    public override async Task Setup()
+    {
+        Console.WriteLine("Publishing truncated zip file to production slot...");
+        var zipPath = Path.Combine(ZipDirectory!, "SampleMarketingAppTruncated.zip");
+        if (!File.Exists(zipPath))
+        {
+            throw new FileNotFoundException($"Truncated zip file not found: {zipPath}");
+        }
+        
+        // Deploy truncated zip via Kudu ZIP deploy
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
+        var credential = new DefaultAzureCredential();
+        var token = await credential.GetTokenAsync(
+            new Azure.Core.TokenRequestContext(new[] { "https://management.azure.com/.default" }));
+        httpClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
+
+        var zipBytes = await File.ReadAllBytesAsync(zipPath);
+        using var content = new ByteArrayContent(zipBytes);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/zip");
+
+        var deployUrl = $"https://{WebAppName}.scm.azurewebsites.net/api/zipdeploy";
+        var response = await httpClient.PostAsync(deployUrl, content);
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadAsStringAsync();
+            throw new Exception($"Failed to deploy truncated zip: {response.StatusCode}, {error}");
+        }
+        
+        // Restart after deployment
+        await RestartApp();
+        Console.WriteLine("Broken zip file deployed and app restarted");
+    }
+
+    public override async Task Recover()
+    {
+        Console.WriteLine("Publishing normal zip file to production slot for recovery...");
+        var zipPath = Path.Combine(ZipDirectory!, "SampleMarketingApp.zip");
+        if (!File.Exists(zipPath))
+        {
+            throw new FileNotFoundException($"Normal zip file not found: {zipPath}");
+        }
+
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
+        var credential = new DefaultAzureCredential();
+        var token = await credential.GetTokenAsync(
+            new Azure.Core.TokenRequestContext(new[] { "https://management.azure.com/.default" }));
+        httpClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Token);
+
+        var zipBytes = await File.ReadAllBytesAsync(zipPath);
+        using var content = new ByteArrayContent(zipBytes);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/zip");
+
+        var deployUrl = $"https://{WebAppName}.scm.azurewebsites.net/api/zipdeploy";
+        var response = await httpClient.PostAsync(deployUrl, content);
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadAsStringAsync();
+            throw new Exception($"Failed to deploy normal zip for recovery: {response.StatusCode}, {error}");
+        }
+        
+        await RestartApp();
+        Console.WriteLine("Recovery complete: normal zip file deployed and app restarted");
     }
 }

@@ -14,6 +14,7 @@
 SampleMarketingAppBad/
 zip/
 badapps.bat
+deploy.bat
 
 # Build results
 [Dd]ebug/
