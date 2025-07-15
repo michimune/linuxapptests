@@ -18,6 +18,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace DeploySampleApps;
 
@@ -250,6 +251,14 @@ class Program
             // Create Web API App
             var webApiApp = await CreateWebApiApp(resourceGroup, appServicePlan);
 
+            // Enable Application Insights for both web apps
+            var aiConnectionString = await CreateApplicationInsightsComponent(resourceGroup, logAnalyticsWorkspace);
+            await ConfigureAppInsights(webApp, aiConnectionString);
+            await ConfigureAppInsights(webApiApp, aiConnectionString);
+            // Tag web apps with hidden-link tags
+            await AddHiddenLinkTagsToResource(webApp, aiConnectionString);
+            await AddHiddenLinkTagsToResource(webApiApp, aiConnectionString);
+
             // Configure diagnostic settings for Web App
             await ConfigureDiagnosticSettings(webApp, logAnalyticsWorkspace);
 
@@ -273,6 +282,9 @@ class Program
 
             // Test Web API App connectivity
             await TestWebApiApp(webApiApp);
+            // Create Standard Availability Tests in Application Insights
+            await CreateAvailabilityTest(webApp, aiConnectionString);
+            await CreateAvailabilityTest(webApiApp, aiConnectionString);
         }
         catch (Azure.RequestFailedException azureEx)
         {
@@ -1140,7 +1152,7 @@ dotnet run --project BadScenarioLinux\BadScenarioLinux.csproj {SubscriptionId} {
         Console.WriteLine("Testing production web app connectivity...");
         
         var webAppUrl = $"https://{webApp.Data.DefaultHostName}";
-        const int maxAttempts = 5;
+        const int maxAttempts = 20;
         const int delaySeconds = 10;
         
         using var httpClient = new HttpClient();
@@ -1193,7 +1205,7 @@ dotnet run --project BadScenarioLinux\BadScenarioLinux.csproj {SubscriptionId} {
         Console.WriteLine("Testing Web API App connectivity...");
         
         var webApiAppUrl = $"https://{webApiApp.Data.DefaultHostName}";
-        const int maxAttempts = 5;
+        const int maxAttempts = 20;
         const int delaySeconds = 10;
         
         using var httpClient = new HttpClient();
@@ -1276,6 +1288,75 @@ dotnet run --project BadScenarioLinux\BadScenarioLinux.csproj {SubscriptionId} {
           return new string(chars);
     }
 
+    // Adds Application Insights connection string to the Web App's application settings.
+    private static async Task ConfigureAppInsights(WebSiteResource webApp, string connectionString)
+    {
+        Console.WriteLine($"Configuring Application Insights for {webApp.Data.Name}");
+        var settingsResponse = await webApp.GetApplicationSettingsAsync();
+        var settings = settingsResponse.Value; // AppServiceConfigurationDictionary
+        settings.Properties["APPLICATIONINSIGHTS_CONNECTION_STRING"] = connectionString;
+        await webApp.UpdateApplicationSettingsAsync(settings);
+        Console.WriteLine($"Configured Application Insights for {webApp.Data.Name}");
+    }
+
+    // Creates or retrieves an Application Insights component in the resource group, linked to the given Log Analytics workspace, and returns its connection string.
+    private static async Task<string> CreateApplicationInsightsComponent(ResourceGroupResource resourceGroup, OperationalInsightsWorkspaceResource logAnalyticsWorkspace)
+    {
+        Console.WriteLine("Checking for existing Application Insights components in region...");
+        var token = await GetAzureManagementTokenAsync();
+        using var httpClient = new HttpClient();
+        httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        var listUrl = $"https://management.azure.com/subscriptions/{SubscriptionId}/providers/microsoft.insights/components?api-version=2020-02-02";
+        var listResponse = await httpClient.GetAsync(listUrl);
+        if (listResponse.IsSuccessStatusCode)
+        {
+            var json = await listResponse.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("value", out var values))
+            {
+                foreach (var item in values.EnumerateArray())
+                {
+                    var location = item.GetProperty("location").GetString();
+                    if (string.Equals(location, Region, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (item.TryGetProperty("properties", out var props) && props.TryGetProperty("ConnectionString", out var connElement))
+                        {
+                            var existing = connElement.GetString();
+                            Console.WriteLine("Found existing Application Insights connection string.");
+                            return existing!;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Not found - create new Application Insights component
+        var componentName = ResourceName + "-ai";
+        Console.WriteLine($"Creating new Application Insights component: {componentName}");
+        var createUrl = $"https://management.azure.com{resourceGroup.Id}/providers/microsoft.insights/components/{componentName}?api-version=2020-02-02";
+        var body = new
+        {
+            location = Region,
+            kind = "web",
+            properties = new
+            {
+                Application_Type = "web",
+                Flow_Type = "Bluefield",
+                WorkspaceResourceId = logAnalyticsWorkspace.Id.ToString()
+            }
+        };
+        var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        var createResponse = await httpClient.PutAsync(createUrl, content);
+        createResponse.EnsureSuccessStatusCode();
+
+        var createJson = await createResponse.Content.ReadAsStringAsync();
+        using var createDoc = JsonDocument.Parse(createJson);
+        var connString = createDoc.RootElement.GetProperty("properties").GetProperty("ConnectionString").GetString();
+        Console.WriteLine("Created Application Insights component and retrieved connection string.");
+        return connString!;
+    }
+
     private static void CopyDirectory(string sourceDir, string targetDir)
     {
         // Create target directory if it doesn't exist
@@ -1298,6 +1379,137 @@ dotnet run --project BadScenarioLinux\BadScenarioLinux.csproj {SubscriptionId} {
             string dirName = Path.GetFileName(subDir);
             string targetSubDir = Path.Combine(targetDir, dirName);
             CopyDirectory(subDir, targetSubDir);
+        }
+    }
+
+    // Creates a Standard availability test in Application Insights for the given web app
+    private static async Task CreateAvailabilityTest(WebSiteResource webApp, string aiConnectionString)
+    {
+        Console.WriteLine($"Ensuring availability test for {webApp.Data.Name} in Application Insights...");
+        var componentId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/microsoft.insights/components/{ResourceName}-ai";
+        var instrumentationKey = string.Empty;
+        var match = Regex.Match(aiConnectionString, @"InstrumentationKey=([^;]+)", RegexOptions.IgnoreCase);
+        if (match.Success) instrumentationKey = match.Groups[1].Value;
+         var testName = $"{webApp.Data.Name}-availability";
+        var listUri = $"https://management.azure.com/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/microsoft.insights/webtests?api-version=2022-06-15";
+        var token = await GetAzureManagementTokenAsync();
+        using var httpClient = new HttpClient();
+        httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+        // Check existing tests
+        var listResponse = await httpClient.GetAsync(listUri);
+        if (listResponse.IsSuccessStatusCode)
+        {
+            var contentJson = await listResponse.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(contentJson);
+            if (doc.RootElement.TryGetProperty("value", out var values))
+            {
+                foreach (var item in values.EnumerateArray())
+                {
+                    if (item.GetProperty("name").GetString() == testName)
+                    {
+                        Console.WriteLine($"Availability test '{testName}' already exists");
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Create new availability test
+        var webUrl = $"https://{webApp.Data.DefaultHostName}/";
+        var putUri = $"https://management.azure.com/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/microsoft.insights/webtests/{testName}?api-version=2022-06-15";
+        var testDefinition = new
+        {
+            location = Region,
+            Name = testName,
+            tags = new Dictionary<string, string>
+            {
+                [$"hidden-link:{componentId}"] = "Resource"
+            },
+            properties = new
+            {
+                Name = testName,
+                 SyntheticMonitorId = testName,
+                 WebTestKind = "ping",
+                 Frequency = 300,
+                 Timeout = 30,
+                 Enabled = true,
+                 Locations = new[]
+                {
+                    new { Id = "us-fl-mia-edge" }
+                },
+                Configuration = (object?)null,
+                Kind = "standard",
+                RetryEnabled = true,
+                ValidationRules = new
+                {
+                    ContentValidation = (string?)null,
+                    ExpectedHttpStatusCode = "200",
+                    IgnoreHttpStatusCode = false,
+                    SSLCheck = true,
+                    SSLCertRemainingLifetimeCheck = "7"
+                },
+                Request = new
+                {
+                    ParseDependentRequests = false,
+                    RequestUrl = webUrl,
+                    Headers = (object?)null,
+                    HttpVerb = "GET",
+                    RequestBody = (string?)null
+                }
+            }
+        };
+        var jsonContent = JsonSerializer.Serialize(testDefinition);
+        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+        var createResponse = await httpClient.PutAsync(putUri, content);
+        if (createResponse.IsSuccessStatusCode)
+        {
+            Console.WriteLine($"Created availability test '{testName}'");
+        }
+        else
+        {
+            var error = await createResponse.Content.ReadAsStringAsync();
+            Console.WriteLine($"Warning: Failed to create availability test '{testName}': {createResponse.StatusCode}, {error}");
+        }
+    }
+
+    // Adds hidden-link tags to App Service resource for Application Insights
+    private static async Task AddHiddenLinkTagsToResource(WebSiteResource webApp, string aiConnectionString)
+    {
+        Console.WriteLine($"Adding hidden-link tags to resource {webApp.Data.Name}...");
+        var componentId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/microsoft.insights/components/{ResourceName}-ai";
+        var instrumentationKey = string.Empty;
+        var match = Regex.Match(aiConnectionString, @"InstrumentationKey=([^;]+)", RegexOptions.IgnoreCase);
+        if (match.Success) instrumentationKey = match.Groups[1].Value;
+
+        var tagsBody = new
+        {
+            tags = new Dictionary<string, string>
+        {
+            ["hidden-link: /app-insights-resource-id"] = componentId,
+            ["hidden-link: /app-insights-instrumentation-key"] = instrumentationKey,
+            ["hidden-link: /app-insights-conn-string"] = aiConnectionString
+        }
+        };
+
+        var patchUri = $"https://management.azure.com{webApp.Id}?api-version=2024-11-01";
+        var json = JsonSerializer.Serialize(tagsBody);
+        using var client = new HttpClient();
+        var token = await GetAzureManagementTokenAsync();
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        var request = new HttpRequestMessage(new HttpMethod("PATCH"), patchUri)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        var response = await client.SendAsync(request);
+        if (response.IsSuccessStatusCode)
+        {
+            Console.WriteLine($"Successfully tagged resource {webApp.Data.Name}");
+        }
+        else
+        {
+            var error = await response.Content.ReadAsStringAsync();
+            Console.WriteLine($"Warning: Failed to tag resource {webApp.Data.Name}: {response.StatusCode} - {error}");
         }
     }
 }
