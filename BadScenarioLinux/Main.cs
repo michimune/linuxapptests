@@ -146,23 +146,23 @@ public class Program
         
         try
         {
-            Console.WriteLine("Step 1: Prevalidate...");
+            Console.WriteLine("Step 1: Prevalidate it is GOOD");
             await scenario.Prevalidate();
             Console.WriteLine("✓ Prevalidation successful");
             
-            Console.WriteLine("Step 2: Setup...");
+            Console.WriteLine("Step 2: Turning mode to BAD");
             await scenario.Setup();
             Console.WriteLine("✓ Setup complete");
             
-            Console.WriteLine("Step 3: Validate (expecting failure)...");
+            Console.WriteLine("Step 3: Validate it is BAD");
             await scenario.Validate();
             Console.WriteLine("✓ Validation complete (failure confirmed)");
             
-            Console.WriteLine("Step 4: Recover...");
+            Console.WriteLine("Step 4: Turning mode to GOOD");
             await scenario.Recover();
             Console.WriteLine("✓ Recovery complete");
             
-            Console.WriteLine("Step 5: Finalize...");
+            Console.WriteLine("Step 5: Validate it is GOOD");
             await scenario.Finalize();
             Console.WriteLine("✓ Finalization successful");
             
