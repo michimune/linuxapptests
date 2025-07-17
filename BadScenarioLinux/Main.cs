@@ -71,6 +71,17 @@ public class Program
                 
                 Console.Write("Select a scenario (0 to exit): ");
                 var input = Console.ReadLine();
+                if (input != null && input.Trim().Equals("all", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var scenarioItem in scenarios)
+                    {
+                        await ExecuteScenario(scenarioItem);
+                    }
+                    Console.WriteLine("\nPress any key to continue...");
+                    Console.ReadKey();
+                    Console.Clear();
+                    continue;
+                }
                 
                 if (!int.TryParse(input, out int choice))
                 {

@@ -55,8 +55,8 @@ string PrivateEndpointName => $"pe-postgresql-{ResourceName}";
 ## Main Loop
 
 1. Display all available scenarios
-2. User selects a scenario by number (0 to exit)
-3. Execute the selected scenario following the lifecycle steps
+2. User selects a scenario by number (0 to exit) or enters `all` to execute all scenarios sequentially
+3. Execute the selected scenario (or all scenarios) following the lifecycle steps
 4. Return to step 1 after completion
 
 ## Implemented Scenarios
