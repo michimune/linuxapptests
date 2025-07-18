@@ -105,6 +105,51 @@ string PrivateEndpointName => $"pe-postgresql-{ResourceName}";
 - **Setup**: Add Deny rule for outbound TCP/5432 for VirtualNetwork to the VNet NSG. Wait for 60 seconds
 - **Recover**: Delete the Deny rule. Wait for 60 seconds
 
+### 12. Specific API Paths Failing
+- **Prevalidate**: Make HTTP request to `/products` and confirm HTTP 200 success
+- **Setup**: Remove `PRODUCTS_ENABLED` app setting and restart the app. Wait for 30 seconds
+- **Validate**: Request `/products` and expect HTTP 404 Not Found
+- **Recover**: Add `PRODUCTS_ENABLED=1`, restart the app, wait for 30 seconds
+- **Finalize**: Request `/products` and confirm HTTP 200 success
+
+### 13. Missing Entry Point
+- **Setup**: Add incorrect startup command `python aaa.py` and restart the app. Wait for 30 seconds
+- **Recover**: Remove startup command setting and restart the app. Wait for 30 seconds
+
+### 14. VNET Integration Breaks Connectivity
+- **Setup**: Remove PostgreSql subnet from the VNet and restart the app. Wait for 30 seconds
+- **Recover**: Restore PostgreSql subnet to the VNet and restart the app. Wait for 30 seconds
+
+### 15. Misconfigured DNS
+- **Setup**: Simulate DNS misconfiguration and restart the app. Wait for 30 seconds
+- **Recover**: Simulate DNS restoration and restart the app. Wait for 30 seconds
+
+### 16. Incorrect Docker Image
+- **Setup**: Simulate Docker image misconfiguration via marker app setting. Restart the app. Wait for 30 seconds
+- **Recover**: Remove marker and simulate Docker image restoration. Restart the app. Wait for 30 seconds
+
+### 17. Incorrect Write Access
+- **Validate**: Make HTTP request to `/api/faults/badwrite` and confirm write failure or exception
+- **Recover**: Wait for write access issue to resolve. Wait for 30 seconds
+
+### 18. Outdated TLS Version
+- **Validate**: Make HTTP request to `/api/faults/badtls` and confirm TLS failure or 5xx status
+
+### 19. External API Latency
+- **Validate**: Measure latency of HTTP request to `/api/faults/slowcall`, categorize severity based on thresholds
+
+### 20. App Restarts Triggered by Auto-Heal Rules
+- **Setup**: Enable auto-heal rule for high memory thresholds, restart the app, trigger high memory request, and wait for rule activation
+- **Validate**: Query Azure Monitor Activity Logs for restart events in the last 10 minutes
+- **Recover**: Disable the auto-heal rule and restart the app
+
+### 21. Poorly Tuned Auto-Heal Rules Cause Instability
+- **Setup**: Enable poorly tuned auto-heal rules and restart the app
+- **Validate**: Query Azure Monitor Activity Logs for restart events
+
+### 22. Cold Starts After Scale-Out
+- **Description**: Scenario implementation in progress, tests cold starts after scaling out
+
 ## Prerequisites
 
 - .NET 8.0 SDK
