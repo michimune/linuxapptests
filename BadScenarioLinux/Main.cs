@@ -203,7 +203,7 @@ public abstract class ScenarioBase
     protected HttpClient HttpClient { get; private set; } = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
     
     public abstract string Description { get; }
-    public virtual string TargetAddress => $"https://webapp-{ResourceName}.azurewebsites.net";
+    public string TargetAddress => $"https://{WebAppName}.azurewebsites.net";
     
     // Resource name properties
     protected string ResourceGroupName => $"rg-{ResourceName}";
@@ -211,7 +211,7 @@ public abstract class ScenarioBase
     protected string SubnetName => "subnet-appservice";
     protected string PostgreSqlSubnetName => "subnet-postgresql";
     protected string AppServicePlanName => $"asp-{ResourceName}";
-    protected string WebAppName => $"webapp-{ResourceName}";
+    public virtual string WebAppName => $"webapp-{ResourceName}";
     protected string PostgreSqlServerName => $"psql-{ResourceName}";
     protected string PrivateEndpointName => $"pe-postgresql-{ResourceName}";
 
@@ -414,6 +414,7 @@ public abstract class ScenarioBase
 public class MissingEnvironmentVariableScenario : ScenarioBase
 {
     public override string Description => "Missing environment variable (SECRET_KEY)";
+    public override string WebAppName => $"noenvvar-{ResourceName}";
     private string? _savedValue;
 
     public override async Task Setup()
@@ -444,6 +445,7 @@ public class MissingEnvironmentVariableScenario : ScenarioBase
 public class MissingConnectionStringScenario : ScenarioBase
 {
     public override string Description => "Missing connection string (DATABASE_URL)";
+    public override string WebAppName => $"noconn-{ResourceName}";
     private string? _savedValue;
 
     public override async Task Setup()
@@ -474,6 +476,7 @@ public class MissingConnectionStringScenario : ScenarioBase
 public class HighMemoryScenario : ScenarioBase
 {
     public override string Description => "High memory usage";
+    public override string WebAppName => $"highmem-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -497,6 +500,7 @@ public class HighMemoryScenario : ScenarioBase
 public class SnatPortExhaustionScenario : ScenarioBase
 {
     public override string Description => "SNAT port exhaustion";
+    public override string WebAppName => $"snat-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -520,6 +524,7 @@ public class SnatPortExhaustionScenario : ScenarioBase
 public class IncorrectStartupCommandScenario : ScenarioBase
 {
     public override string Description => "Incorrect startup command";
+    public override string WebAppName => $"badstartcmd-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -540,6 +545,7 @@ public class IncorrectStartupCommandScenario : ScenarioBase
 public class HighCpuScenario : ScenarioBase
 {
     public override string Description => "High CPU usage";
+    public override string WebAppName => $"highcpu-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -563,6 +569,7 @@ public class HighCpuScenario : ScenarioBase
 public class MisconfiguredConnectionStringScenario : ScenarioBase
 {
     public override string Description => "Misconfigured connection string (wrong host name)";
+    public override string WebAppName => $"badconn-{ResourceName}";
     private string? _savedValue;
 
     public override async Task Setup()
@@ -593,7 +600,9 @@ public class MisconfiguredConnectionStringScenario : ScenarioBase
 
 [Scenario]
 public class SpecificApiPathsFailingScenario : ScenarioBase
-{    public override string Description => "Specific API paths failing due to misconfigured app settings";
+{
+    public override string Description => "Specific API paths failing due to misconfigured app settings";
+    public override string WebAppName => $"badpaths-{ResourceName}";
     private string? _originalValue;
 
     public override async Task Prevalidate()
@@ -650,6 +659,7 @@ public class SpecificApiPathsFailingScenario : ScenarioBase
 public class MissingEntryPointScenario : ScenarioBase
 {
     public override string Description => "Missing entry point (incorrect startup command)";
+    public override string WebAppName => $"badentry-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -687,6 +697,7 @@ public class MissingEntryPointScenario : ScenarioBase
 public class SqlConnectionRejectedScenario : ScenarioBase
 {
     public override string Description => "SQL connection rejected (private endpoint)";
+    public override string WebAppName => $"sqlreject-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -706,6 +717,7 @@ public class SqlConnectionRejectedScenario : ScenarioBase
 public class SqlServerNotRespondingScenario : ScenarioBase
 {
     public override string Description => "SQL server not responding (server stopped)";
+    public override string WebAppName => $"sqldead-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -725,6 +737,7 @@ public class SqlServerNotRespondingScenario : ScenarioBase
 public class FirewallBlocksConnectionScenario : ScenarioBase
 {
     public override string Description => "Firewall blocks SQL connection";
+    public override string WebAppName => $"fwblock-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -744,6 +757,7 @@ public class FirewallBlocksConnectionScenario : ScenarioBase
 public class MissingDependencyScenario : ScenarioBase
 {
     public override string Description => "Missing dependency (deployment slot swap)";
+    public override string WebAppName => $"depmiss-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -763,6 +777,7 @@ public class MissingDependencyScenario : ScenarioBase
 public class VNetIntegrationBreaksConnectivityScenario : ScenarioBase
 {
     public override string Description => "VNET integration breaks connectivity to internal resources";
+    public override string WebAppName => $"vnetbreak-{ResourceName}";
     private SubnetResource? _savedPostgreSqlSubnet;
 
     public override async Task Setup()
@@ -839,6 +854,7 @@ public class VNetIntegrationBreaksConnectivityScenario : ScenarioBase
 public class MisconfiguredDnsScenario : ScenarioBase
 {
     public override string Description => "Misconfigured DNS";
+    public override string WebAppName => $"baddns-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -879,6 +895,7 @@ public class MisconfiguredDnsScenario : ScenarioBase
 public class IncorrectDockerImageScenario : ScenarioBase
 {
     public override string Description => "Incorrect Docker image";
+    public override string WebAppName => $"baddocker-{ResourceName}";
     private string? _originalLinuxFxVersion;
 
     public override async Task Setup()
@@ -959,6 +976,7 @@ public class IncorrectDockerImageScenario : ScenarioBase
 public class IncorrectWriteAccessScenario : ScenarioBase
 {
     public override string Description => "Incorrect write access";
+    public override string WebAppName => $"badwrite-{ResourceName}";
 
     public override async Task Validate()
     {
@@ -992,6 +1010,7 @@ public class IncorrectWriteAccessScenario : ScenarioBase
 public class OutdatedTlsVersionScenario : ScenarioBase
 {
     public override string Description => "App uses outdated TLS version for outbound connections";
+    public override string WebAppName => $"badtls-{ResourceName}";
 
     public override async Task Validate()
     {
@@ -1027,6 +1046,7 @@ public class OutdatedTlsVersionScenario : ScenarioBase
 public class ExternalApiLatencyScenario : ScenarioBase
 {
     public override string Description => "External API latency causes user-visible slowness";
+    public override string WebAppName => $"slowcall-{ResourceName}";
 
     public override async Task Validate()
     {
@@ -1070,6 +1090,7 @@ public class ExternalApiLatencyScenario : ScenarioBase
 public class AppRestartsTriggeredByAutoHealScenario : ScenarioBase
 {
     public override string Description => "App restarts triggered by auto-heal rules";
+    public override string WebAppName => $"autoheal-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -1319,6 +1340,7 @@ public class AppRestartsTriggeredByAutoHealScenario : ScenarioBase
 public class PoorlyTunedAutoHealRulesScenario : ScenarioBase
 {
     public override string Description => "Poorly tuned auto-heal rules cause instability";
+    public override string WebAppName => $"poorheal-{ResourceName}";
 
     public override async Task Setup()
     {
@@ -1605,6 +1627,8 @@ public class PoorlyTunedAutoHealRulesScenario : ScenarioBase
 public class ColdStartsAfterScaleOutScenario : ScenarioBase
 {
     public override string Description => "Cold starts after scale-out";
+    public override string WebAppName => $"coldstart-{ResourceName}";
+
     private int _originalInstanceCount;
 
     public override async Task Setup()
@@ -1894,6 +1918,8 @@ public class ColdStartsAfterScaleOutScenario : ScenarioBase
 public class PublishBrokenZipFileScenario : ScenarioBase
 {
     public override string Description => "Publish broken zip file";
+    public override string WebAppName => $"brokenzip-{ResourceName}";
+
 
     public override async Task Setup()
     {
