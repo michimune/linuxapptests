@@ -16,6 +16,11 @@ using Azure.ResourceManager.Resources;
 using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
+using System.Linq;
+using System.Reflection;
+using System.Collections.Generic;
+using BadScenarioLinux;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -106,7 +111,7 @@ class Program
             await ValidateAzureAuthentication();
 
             // Deploy infrastructure
-            await DeployInfrastructure();
+            await DeployInfrastructure(zipDir);
 
             Console.WriteLine("Deployment completed successfully!");
             return 0;
@@ -211,7 +216,7 @@ class Program
         Console.WriteLine($"Created truncated zip file: {truncatedZipFileName} ({truncatedBytes.Length} bytes from {originalBytes.Length} bytes)");
     }
 
-    private static async Task DeployInfrastructure()
+    private static async Task DeployInfrastructure(string zipDir)
     {
         try
         {
@@ -245,46 +250,49 @@ class Program
             // Create Log Analytics Workspace
             var logAnalyticsWorkspace = await CreateLogAnalyticsWorkspace(resourceGroup);
 
-            // Create Web App
-            var webApp = await CreateWebApp(resourceGroup, appServicePlan);
+            // Create Web Apps for each scenario class
+            // Load scenario types from BadScenarioLinux assembly and create a web app per scenario
+            var scenarioAssembly = Assembly.Load("BadScenarioLinux");
+            var scenarioTypes = scenarioAssembly.GetTypes()
+                .Where(t => typeof(ScenarioBase).IsAssignableFrom(t) && !t.IsAbstract);
+            var webApps = new List<WebSiteResource>();
+            foreach (var type in scenarioTypes)
+            {
+                // Instantiate scenario and set ResourceName via reflection
+                var scenario = (ScenarioBase)Activator.CreateInstance(type)!;
+                // Initialize scenario with context parameters
+                scenario.Initialize(_armClient, ResourceName, SubscriptionId, zipDir);
+                // Determine web app name from scenario override
+                var name = scenario.WebAppName;
+                // Create web app for this scenario
+                var webAppResource = await CreateWebApp(resourceGroup, appServicePlan, name);
+                webApps.Add(webAppResource);
+            }
 
-            // Create Web API App
-            var webApiApp = await CreateWebApiApp(resourceGroup, appServicePlan);
+    // Create Web API App
+    var webApiApp = await CreateWebApiApp(resourceGroup, appServicePlan);
 
-            // Enable Application Insights for both web apps
+            // Enable Application Insights for all created web apps and the Web API app
             var aiConnectionString = await CreateApplicationInsightsComponent(resourceGroup, logAnalyticsWorkspace);
-            await ConfigureAppInsights(webApp, aiConnectionString);
+            // Process Web API app
             await ConfigureAppInsights(webApiApp, aiConnectionString);
-            // Tag web apps with hidden-link tags
-            await AddHiddenLinkTagsToResource(webApp, aiConnectionString);
             await AddHiddenLinkTagsToResource(webApiApp, aiConnectionString);
-
-            // Configure diagnostic settings for Web App
-            await ConfigureDiagnosticSettings(webApp, logAnalyticsWorkspace);
-
-            // Configure diagnostic settings for Web API App
             await ConfigureDiagnosticSettings(webApiApp, logAnalyticsWorkspace);
-
-            // Configure VNet integration for Web App
-            await ConfigureVNetIntegration(webApp, vnet);
-
-            // Configure VNet integration for Web API App
             await ConfigureVNetIntegration(webApiApp, vnet);
-
-            // Deploy applications
-            await DeployApplications(webApp);
-
-            // Deploy Web API App
             await DeployWebApiApp(webApiApp);
-
-            // Test production web app connectivity
-            await TestProductionWebApp(webApp);
-
-            // Test Web API App connectivity
             await TestWebApiApp(webApiApp);
-            // Create Standard Availability Tests in Application Insights
-            await CreateAvailabilityTest(webApp, aiConnectionString);
             await CreateAvailabilityTest(webApiApp, aiConnectionString);
+            // Process scenario web apps
+            foreach (var webApp in webApps)
+            {
+                await ConfigureAppInsights(webApp, aiConnectionString);
+                await AddHiddenLinkTagsToResource(webApp, aiConnectionString);
+                await ConfigureDiagnosticSettings(webApp, logAnalyticsWorkspace);
+                await ConfigureVNetIntegration(webApp, vnet);
+                await DeployApplications(webApp);
+                await TestProductionWebApp(webApp);
+                await CreateAvailabilityTest(webApp, aiConnectionString);
+            }
         }
         catch (Azure.RequestFailedException azureEx)
         {
@@ -498,8 +506,8 @@ class Program
         {
             Sku = new AppServiceSkuDescription()
             {
-                Name = "S1",
-                Tier = "Standard",
+                Name = "P3V3",
+                Tier = "PremiumV3",
                 Capacity = 1
             },
             Kind = "linux",
@@ -535,9 +543,9 @@ class Program
     }
 
     private static async Task<WebSiteResource> CreateWebApp(ResourceGroupResource resourceGroup, 
-        AppServicePlanResource appServicePlan)
+        AppServicePlanResource appServicePlan, string webAppName)
     {
-        Console.WriteLine("Creating Web App...");        var webAppData = new WebSiteData(Region)
+        Console.WriteLine($"Creating Web App: {webAppName}");        var webAppData = new WebSiteData(Region)
         {
             AppServicePlanId = appServicePlan.Data.Id,
             SiteConfig = new SiteConfigProperties()
@@ -549,9 +557,9 @@ class Program
         };
 
         var webAppLro = await resourceGroup.GetWebSites()
-            .CreateOrUpdateAsync(Azure.WaitUntil.Completed, WebAppName, webAppData);
+            .CreateOrUpdateAsync(Azure.WaitUntil.Completed, webAppName, webAppData);
 
-        Console.WriteLine($"Created Web App: {WebAppName}");
+        Console.WriteLine($"Created Web App: {webAppName}");
         return webAppLro.Value;
     }
 
