@@ -65,7 +65,7 @@ class Program
             SubscriptionId = args[0];
             Region = args[1];
             SampleAppBaseDir = args[2];
-            ResourceName = args[3];            Console.WriteLine($"Starting deployment to subscription {SubscriptionId} in region {Region}");
+            ResourceName = args[3];            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Starting deployment to subscription {SubscriptionId} in region {Region}");
             Console.WriteLine($"Using sample app base directory: {SampleAppBaseDir}");
             Console.WriteLine($"Using resource name: {ResourceName}");
             Console.WriteLine();
@@ -113,7 +113,7 @@ class Program
             // Deploy infrastructure
             await DeployInfrastructure(zipDir);
 
-            Console.WriteLine("Deployment completed successfully!");
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Deployment completed successfully!");
             return 0;
         }
         catch (Exception ex)
