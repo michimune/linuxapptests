@@ -778,31 +778,59 @@ public class VNetIntegrationBreaksConnectivityScenario : ScenarioBase
 {
     public override string Description => "VNET integration breaks connectivity to internal resources";
     public override string WebAppName => $"vnetbreak-{ResourceName}";
-    private SubnetResource? _savedPostgreSqlSubnet;
+    private string? _savedVNetIntegrationConfig;
 
     public override async Task Setup()
     {
-        Console.WriteLine("Saving subnet settings and removing PostgreSql subnet from VNET...");
+        Console.WriteLine("Disconnecting VNET integration...");
         
         try
         {
-            // Get the VNET resource
-            var subscription = ArmClient!.GetSubscriptionResource(ResourceIdentifier.Parse($"/subscriptions/{SubscriptionId}"));
-            var resourceGroup = await subscription.GetResourceGroupAsync(ResourceGroupName);
-            var vnet = await resourceGroup.Value.GetVirtualNetworkAsync(VNetName);
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
             
-            // Save the PostgreSql subnet
-            var postgresqlSubnet = await vnet.Value.GetSubnetAsync(PostgreSqlSubnetName);
-            _savedPostgreSqlSubnet = postgresqlSubnet.Value;
-              // Remove the PostgreSql subnet
-            await _savedPostgreSqlSubnet.DeleteAsync(Azure.WaitUntil.Completed);
-            Console.WriteLine($"✓ Removed subnet '{PostgreSqlSubnetName}' from VNET");
+            // First, get the current VNet integration configuration
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var getVNetConfigUrl = $"https://management.azure.com{resourceId}/networkConfig/virtualNetwork?api-version=2022-03-01";
+            
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Get current VNet integration config
+            var getResponse = await httpClient.GetAsync(getVNetConfigUrl);
+            if (getResponse.IsSuccessStatusCode)
+            {
+                _savedVNetIntegrationConfig = await getResponse.Content.ReadAsStringAsync();
+                Console.WriteLine("✓ Saved current VNet integration configuration");
+            }
+            else
+            {
+                Console.WriteLine($"⚠️  Could not retrieve VNet integration config (Status: {(int)getResponse.StatusCode})");
+            }
+            
+            // Disconnect VNet integration by sending DELETE request
+            var deleteResponse = await httpClient.DeleteAsync(getVNetConfigUrl);
+            
+            if (deleteResponse.IsSuccessStatusCode)
+            {
+                Console.WriteLine("✓ Successfully disconnected VNet integration");
+            }
+            else
+            {
+                var errorContent = await deleteResponse.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to disconnect VNet integration (Status: {(int)deleteResponse.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Falling back to simulation...");
+                await SetAppSetting("_SCENARIO_VNET_DISCONNECTED", "true");
+            }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"⚠️  Could not modify VNET subnets: {ex.Message}");
-            Console.WriteLine("Simulating VNET subnet removal...");
-            await Task.Delay(2000);
+            Console.WriteLine($"⚠️  Error disconnecting VNet integration: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await SetAppSetting("_SCENARIO_VNET_DISCONNECTED", "true");
         }
         
         // Restart the app
@@ -814,32 +842,65 @@ public class VNetIntegrationBreaksConnectivityScenario : ScenarioBase
 
     public override async Task Recover()
     {
-        Console.WriteLine("Restoring VNET subnets and restarting app...");
+        Console.WriteLine("Reconnecting VNET integration...");
         
         try
         {
-            if (_savedPostgreSqlSubnet != null)
+            if (!string.IsNullOrEmpty(_savedVNetIntegrationConfig))
             {
-                // Get the VNET resource
-                var subscription = ArmClient!.GetSubscriptionResource(ResourceIdentifier.Parse($"/subscriptions/{SubscriptionId}"));
-                var resourceGroup = await subscription.GetResourceGroupAsync(ResourceGroupName);
-                var vnet = await resourceGroup.Value.GetVirtualNetworkAsync(VNetName);
+                // Get access token from DefaultAzureCredential
+                var credential = new DefaultAzureCredential();
+                var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+                var accessToken = await credential.GetTokenAsync(tokenRequestContext);
                 
-                // Recreate the PostgreSql subnet
-                var subnetData = new SubnetData()
+                // Reconnect VNet integration using saved configuration
+                var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+                var putVNetConfigUrl = $"https://management.azure.com{resourceId}/networkConfig/virtualNetwork?api-version=2022-03-01";
+                
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+                
+                var content = new StringContent(_savedVNetIntegrationConfig, System.Text.Encoding.UTF8, "application/json");
+                var putResponse = await httpClient.PutAsync(putVNetConfigUrl, content);
+                
+                if (putResponse.IsSuccessStatusCode)
                 {
-                    Name = PostgreSqlSubnetName,
-                    AddressPrefix = "10.0.2.0/24", // Assuming standard subnet configuration
-                };
-                  await vnet.Value.GetSubnets().CreateOrUpdateAsync(Azure.WaitUntil.Completed, PostgreSqlSubnetName, subnetData);
-                Console.WriteLine($"✓ Restored subnet '{PostgreSqlSubnetName}' to VNET");
+                    Console.WriteLine("✓ Successfully reconnected VNet integration");
+                }
+                else
+                {
+                    var errorContent = await putResponse.Content.ReadAsStringAsync();
+                    Console.WriteLine($"⚠️  Failed to reconnect VNet integration (Status: {(int)putResponse.StatusCode})");
+                    Console.WriteLine($"Error: {errorContent}");
+                    Console.WriteLine("Falling back to manual reconnection...");
+                    
+                    // Try alternative approach using subnet resource ID
+                    await ReconnectVNetIntegrationManually(httpClient, accessToken.Token);
+                }
             }
+            else
+            {
+                Console.WriteLine("No saved VNet configuration found, attempting manual reconnection...");
+                
+                // Get access token for manual reconnection
+                var credential = new DefaultAzureCredential();
+                var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+                var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+                
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+                
+                await ReconnectVNetIntegrationManually(httpClient, accessToken.Token);
+            }
+            
+            // Remove simulation marker if it exists
+            await RemoveAppSetting("_SCENARIO_VNET_DISCONNECTED");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"⚠️  Could not restore VNET subnets: {ex.Message}");
-            Console.WriteLine("Simulating VNET subnet restoration...");
-            await Task.Delay(2000);
+            Console.WriteLine($"⚠️  Error reconnecting VNet integration: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await RemoveAppSetting("_SCENARIO_VNET_DISCONNECTED");
         }
         
         // Restart the app
@@ -847,6 +908,46 @@ public class VNetIntegrationBreaksConnectivityScenario : ScenarioBase
         
         Console.WriteLine("Waiting 30 seconds for app to restart...");
         await Task.Delay(30000);
+    }
+    
+    private async Task ReconnectVNetIntegrationManually(HttpClient httpClient, string accessToken)
+    {
+        try
+        {
+            // Construct the VNet integration configuration manually
+            var subnetResourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Network/virtualNetworks/{VNetName}/subnets/{SubnetName}";
+            
+            var vnetIntegrationConfig = new
+            {
+                properties = new
+                {
+                    subnetResourceId = subnetResourceId,
+                    swiftSupported = true
+                }
+            };
+            
+            var jsonContent = JsonSerializer.Serialize(vnetIntegrationConfig);
+            var resourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}";
+            var putVNetConfigUrl = $"https://management.azure.com{resourceId}/networkConfig/virtualNetwork?api-version=2022-03-01";
+            
+            var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+            var putResponse = await httpClient.PutAsync(putVNetConfigUrl, content);
+            
+            if (putResponse.IsSuccessStatusCode)
+            {
+                Console.WriteLine("✓ Successfully reconnected VNet integration manually");
+            }
+            else
+            {
+                var errorContent = await putResponse.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Failed to reconnect VNet integration manually (Status: {(int)putResponse.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error in manual VNet reconnection: {ex.Message}");
+        }
     }
 }
 
@@ -855,18 +956,85 @@ public class MisconfiguredDnsScenario : ScenarioBase
 {
     public override string Description => "Misconfigured DNS";
     public override string WebAppName => $"baddns-{ResourceName}";
+    private string? _originalVNetConfig;
 
     public override async Task Setup()
     {
-        Console.WriteLine("Simulating DNS misconfiguration by setting invalid DNS server...");
+        Console.WriteLine("Configuring custom DNS server (1.1.1.1) on VNet...");
         
-        // Note: Direct DNS server configuration via Azure SDK may require specific permissions
-        // and access to DHCP options which may not be available in all SDK versions.
-        // This scenario simulates the DNS misconfiguration effect.
-        
-        Console.WriteLine("⚠️  This scenario simulates DNS server misconfiguration.");
-        Console.WriteLine("In a real scenario, this would set 10.0.0.1 as custom DNS server on the VNET.");
-        await Task.Delay(2000);
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            // Get current VNet configuration
+            var vnetResourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Network/virtualNetworks/{VNetName}";
+            var getVNetUrl = $"https://management.azure.com{vnetResourceId}?api-version=2023-05-01";
+            
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Get current VNet configuration
+            var getResponse = await httpClient.GetAsync(getVNetUrl);
+            if (getResponse.IsSuccessStatusCode)
+            {
+                _originalVNetConfig = await getResponse.Content.ReadAsStringAsync();
+                Console.WriteLine("✓ Saved original VNet configuration");
+                
+                // Parse the current configuration to modify DNS settings
+                using var originalDoc = JsonDocument.Parse(_originalVNetConfig);
+                var properties = originalDoc.RootElement.GetProperty("properties");
+                
+                // Create new VNet configuration with custom DNS server
+                var updatedVNetConfig = new
+                {
+                    properties = new
+                    {
+                        addressSpace = properties.GetProperty("addressSpace"),
+                        subnets = properties.GetProperty("subnets"),
+                        dhcpOptions = new
+                        {
+                            dnsServers = new[] { "1.1.1.1" }
+                        }
+                    }
+                };
+                
+                var jsonContent = JsonSerializer.Serialize(updatedVNetConfig);
+                var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+                
+                // Update VNet with custom DNS server
+                var putResponse = await httpClient.PutAsync(getVNetUrl, content);
+                
+                if (putResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine("✓ Successfully configured custom DNS server (1.1.1.1) on VNet");
+                }
+                else
+                {
+                    var errorContent = await putResponse.Content.ReadAsStringAsync();
+                    Console.WriteLine($"⚠️  Failed to configure custom DNS server (Status: {(int)putResponse.StatusCode})");
+                    Console.WriteLine($"Error: {errorContent}");
+                    Console.WriteLine("Falling back to simulation...");
+                    await SetAppSetting("_SCENARIO_DNS_MISCONFIGURED", "true");
+                }
+            }
+            else
+            {
+                var errorContent = await getResponse.Content.ReadAsStringAsync();
+                Console.WriteLine($"⚠️  Could not retrieve VNet configuration (Status: {(int)getResponse.StatusCode})");
+                Console.WriteLine($"Error: {errorContent}");
+                Console.WriteLine("Falling back to simulation...");
+                await SetAppSetting("_SCENARIO_DNS_MISCONFIGURED", "true");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error configuring custom DNS server: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await SetAppSetting("_SCENARIO_DNS_MISCONFIGURED", "true");
+        }
         
         // Restart the app
         await RestartApp();
@@ -877,17 +1045,145 @@ public class MisconfiguredDnsScenario : ScenarioBase
 
     public override async Task Recover()
     {
-        Console.WriteLine("Simulating DNS restoration...");
+        Console.WriteLine("Restoring inherited DNS server settings on VNet...");
         
-        Console.WriteLine("⚠️  This scenario simulates DNS server restoration.");
-        Console.WriteLine("In a real scenario, this would restore the original DNS servers.");
-        await Task.Delay(2000);
+        try
+        {
+            if (!string.IsNullOrEmpty(_originalVNetConfig))
+            {
+                // Get access token from DefaultAzureCredential
+                var credential = new DefaultAzureCredential();
+                var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+                var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+                
+                // Parse original configuration and remove custom DNS settings
+                using var originalDoc = JsonDocument.Parse(_originalVNetConfig);
+                var properties = originalDoc.RootElement.GetProperty("properties");
+                
+                // Create VNet configuration without custom DNS (inherit from Azure)
+                var restoredVNetConfig = new
+                {
+                    properties = new
+                    {
+                        addressSpace = properties.GetProperty("addressSpace"),
+                        subnets = properties.GetProperty("subnets")
+                        // Omit dhcpOptions to inherit default Azure DNS
+                    }
+                };
+                
+                var vnetResourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Network/virtualNetworks/{VNetName}";
+                var putVNetUrl = $"https://management.azure.com{vnetResourceId}?api-version=2023-05-01";
+                
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+                
+                var jsonContent = JsonSerializer.Serialize(restoredVNetConfig);
+                var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+                
+                // Restore VNet to inherit Azure DNS
+                var putResponse = await httpClient.PutAsync(putVNetUrl, content);
+                
+                if (putResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine("✓ Successfully restored VNet to inherit Azure DNS settings");
+                }
+                else
+                {
+                    var errorContent = await putResponse.Content.ReadAsStringAsync();
+                    Console.WriteLine($"⚠️  Failed to restore DNS settings (Status: {(int)putResponse.StatusCode})");
+                    Console.WriteLine($"Error: {errorContent}");
+                    Console.WriteLine("Falling back to manual restoration...");
+                    
+                    // Try alternative approach - explicitly set Azure DNS
+                    await RestoreDnsManually(httpClient, accessToken.Token);
+                }
+            }
+            else
+            {
+                Console.WriteLine("No original VNet configuration found, attempting manual DNS restoration...");
+                
+                // Get access token for manual restoration
+                var credential = new DefaultAzureCredential();
+                var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+                var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+                
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+                
+                await RestoreDnsManually(httpClient, accessToken.Token);
+            }
+            
+            // Remove simulation marker if it exists
+            await RemoveAppSetting("_SCENARIO_DNS_MISCONFIGURED");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error restoring DNS settings: {ex.Message}");
+            Console.WriteLine("Falling back to simulation...");
+            await RemoveAppSetting("_SCENARIO_DNS_MISCONFIGURED");
+        }
         
         // Restart the app
         await RestartApp();
         
         Console.WriteLine("Waiting 30 seconds for app to restart...");
         await Task.Delay(30000);
+    }
+    
+    private async Task RestoreDnsManually(HttpClient httpClient, string accessToken)
+    {
+        try
+        {
+            // Get current VNet configuration
+            var vnetResourceId = $"/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Network/virtualNetworks/{VNetName}";
+            var getVNetUrl = $"https://management.azure.com{vnetResourceId}?api-version=2023-05-01";
+            
+            var getResponse = await httpClient.GetAsync(getVNetUrl);
+            if (getResponse.IsSuccessStatusCode)
+            {
+                var currentConfig = await getResponse.Content.ReadAsStringAsync();
+                using var configDoc = JsonDocument.Parse(currentConfig);
+                var properties = configDoc.RootElement.GetProperty("properties");
+                
+                // Create VNet configuration with Azure default DNS (168.63.129.16)
+                var vnetConfigWithAzureDns = new
+                {
+                    properties = new
+                    {
+                        addressSpace = properties.GetProperty("addressSpace"),
+                        subnets = properties.GetProperty("subnets"),
+                        dhcpOptions = new
+                        {
+                            dnsServers = new[] { "168.63.129.16" } // Azure default DNS
+                        }
+                    }
+                };
+                
+                var jsonContent = JsonSerializer.Serialize(vnetConfigWithAzureDns);
+                var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+                
+                var putResponse = await httpClient.PutAsync(getVNetUrl, content);
+                
+                if (putResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine("✓ Successfully restored VNet DNS to Azure default (168.63.129.16)");
+                }
+                else
+                {
+                    var errorContent = await putResponse.Content.ReadAsStringAsync();
+                    Console.WriteLine($"⚠️  Failed to restore DNS manually (Status: {(int)putResponse.StatusCode})");
+                    Console.WriteLine($"Error: {errorContent}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"⚠️  Could not retrieve current VNet configuration for manual restoration");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error in manual DNS restoration: {ex.Message}");
+        }
     }
 }
 
