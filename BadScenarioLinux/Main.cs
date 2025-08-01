@@ -906,6 +906,66 @@ public abstract class ScenarioBase
             return false;
         }
     }
+
+    protected async Task<string?> GetStartupCommandFromStagingSlot()
+    {
+        try
+        {
+            Console.WriteLine("Checking staging slot for correct startup command...");
+            
+            // Try to access staging slot using REST API approach
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Build staging slot app settings URL
+            var stagingSlotUrl = $"https://management.azure.com/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.Web/sites/{WebAppName}/slots/staging/config/appsettings/list?api-version=2022-03-01";
+            
+            try
+            {
+                var response = await httpClient.PostAsync(stagingSlotUrl, new StringContent(""));
+                
+                if (response.IsSuccessStatusCode)
+                {
+                    var content = await response.Content.ReadAsStringAsync();
+                    using var doc = JsonDocument.Parse(content);
+                    
+                    if (doc.RootElement.TryGetProperty("properties", out var properties) &&
+                        properties.TryGetProperty("AZURE_WEBAPP_STARTUP_COMMAND", out var startupCommandElement))
+                    {
+                        var stagingStartupCommand = startupCommandElement.GetString();
+                        Console.WriteLine($"✓ Found startup command in staging slot: {stagingStartupCommand}");
+                        return stagingStartupCommand;
+                    }
+                    else
+                    {
+                        Console.WriteLine("ℹ️  No startup command configured in staging slot");
+                        return null;
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"ℹ️  Staging slot not accessible (Status: {(int)response.StatusCode})");
+                }
+            }
+            catch (Exception slotEx)
+            {
+                Console.WriteLine($"ℹ️  Staging slot not available: {slotEx.Message}");
+            }
+            
+            // If staging slot is not available, return null to use platform defaults
+            Console.WriteLine("ℹ️  No reliable startup command found from staging slot, will remove setting to use platform defaults");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error retrieving startup command from staging slot: {ex.Message}");
+            return null;
+        }
+    }
 }
 
 // Scenario implementations
@@ -1546,9 +1606,142 @@ public class IncorrectStartupCommandScenario : ScenarioBase
 
     public override async Task<bool> Recover()
     {
-        await UpdateAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", null);
-        Console.WriteLine("Removed incorrect startup command");
-        await Task.Delay(30000); // Wait 30 seconds
+        Console.WriteLine("Analyzing application logs to identify startup command issues...");
+        
+        try
+        {
+            // Get application logs to find startup command errors
+            var (consoleLogs, httpLogs) = await GetApplicationLogsAsync(15); // Last 15 minutes
+            
+            bool startupFailureDetected = false;
+            string? failureMessage = null;
+            
+            // Look for Docker container startup failure indicators in console logs
+            foreach (var logEntry in consoleLogs)
+            {
+                var lowerLogEntry = logEntry.ToLower();
+                
+                // Check for Docker container startup failures
+                if (lowerLogEntry.Contains("docker") && 
+                    (lowerLogEntry.Contains("failed to start") || lowerLogEntry.Contains("container start failed") || 
+                     lowerLogEntry.Contains("startup command failed") || lowerLogEntry.Contains("command not found")))
+                {
+                    startupFailureDetected = true;
+                    failureMessage = logEntry;
+                    Console.WriteLine($"✓ Docker container startup failure detected: {logEntry}");
+                    break;
+                }
+                
+                // Check for startup command execution errors
+                if ((lowerLogEntry.Contains("startup command") || lowerLogEntry.Contains("start command")) && 
+                    (lowerLogEntry.Contains("error") || lowerLogEntry.Contains("failed") || lowerLogEntry.Contains("not found")))
+                {
+                    startupFailureDetected = true;
+                    failureMessage = logEntry;
+                    Console.WriteLine($"✓ Startup command execution error detected: {logEntry}");
+                    break;
+                }
+                
+                // Check for process execution failures
+                if (lowerLogEntry.Contains("process") && 
+                    (lowerLogEntry.Contains("exited") || lowerLogEntry.Contains("terminated") || lowerLogEntry.Contains("crashed")) &&
+                    (lowerLogEntry.Contains("code") || lowerLogEntry.Contains("error")))
+                {
+                    startupFailureDetected = true;
+                    failureMessage = logEntry;
+                    Console.WriteLine($"✓ Process execution failure detected: {logEntry}");
+                    break;
+                }
+                
+                // Check for specific command not found errors
+                if (lowerLogEntry.Contains("command not found") || lowerLogEntry.Contains("no such file or directory"))
+                {
+                    startupFailureDetected = true;
+                    failureMessage = logEntry;
+                    Console.WriteLine($"✓ Command not found error detected: {logEntry}");
+                    break;
+                }
+            }
+            
+            if (startupFailureDetected)
+            {
+                Console.WriteLine($"🔴 Startup command failure confirmed: {failureMessage}");
+                Console.WriteLine("Attempting to recover by using staging slot's startup command...");
+                
+                try
+                {
+                    // Try to get the correct startup command from staging slot
+                    string? correctStartupCommand = await GetStartupCommandFromStagingSlot();
+                    
+                    if (!string.IsNullOrEmpty(correctStartupCommand))
+                    {
+                        Console.WriteLine($"✓ Found correct startup command from staging slot: {correctStartupCommand}");
+                        await UpdateAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", correctStartupCommand);
+                        Console.WriteLine("✓ Updated startup command with staging slot configuration");
+                    }
+                    else
+                    {
+                        Console.WriteLine("⚠️  No staging slot startup command found, removing incorrect startup command");
+                        await UpdateAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", null);
+                        Console.WriteLine("✓ Removed incorrect startup command");
+                    }
+                    
+                    // Restart the app
+                    await RestartApp();
+                    
+                    Console.WriteLine("Waiting 30 seconds for app to restart with corrected startup command...");
+                    await Task.Delay(30000);
+                    
+                    // Verify the app is working after restart
+                    try
+                    {
+                        await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+                        Console.WriteLine("✓ Application recovery successful after correcting startup command");
+                        return true;
+                    }
+                    catch (Exception verifyEx)
+                    {
+                        Console.WriteLine($"⚠️  Application still having issues after startup command correction: {verifyEx.Message}");
+                        Console.WriteLine("Waiting additional 30 seconds for startup to complete...");
+                        await Task.Delay(30000);
+                        return false;
+                    }
+                }
+                catch (Exception recoveryEx)
+                {
+                    Console.WriteLine($"⚠️  Error during startup command recovery: {recoveryEx.Message}");
+                    Console.WriteLine("Falling back to removing startup command entirely...");
+                    
+                    await UpdateAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", null);
+                    await RestartApp();
+                    await Task.Delay(30000);
+                    return false;
+                }
+            }
+            else
+            {
+                Console.WriteLine("ℹ️  No startup command failures detected in logs");
+                Console.WriteLine("Removing potentially incorrect startup command as precaution...");
+                
+                await UpdateAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", null);
+                Console.WriteLine("✓ Removed startup command setting");
+                
+                await RestartApp();
+                Console.WriteLine("Waiting 30 seconds for app to restart...");
+                await Task.Delay(30000);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error analyzing startup command issues: {ex.Message}");
+            Console.WriteLine("Falling back to removing startup command...");
+            
+            await UpdateAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", null);
+            Console.WriteLine("✓ Removed startup command setting as fallback");
+            await Task.Delay(30000);
+            return false;
+        }
     }
 }
 
@@ -1571,8 +1764,139 @@ public class HighCpuScenario : ScenarioBase
 
     public override async Task<bool> Recover()
     {
-        Console.WriteLine("Waiting 60 seconds for CPU to stabilize...");
-        await Task.Delay(60000);
+        Console.WriteLine("Analyzing CPU usage metrics to determine if intervention is needed...");
+        
+        try
+        {
+            // First, check actual CPU metrics from Azure Monitor
+            Console.WriteLine("Retrieving CPU usage metrics from Azure Monitor...");
+            var highCpuDetectedFromMetrics = await CheckMetricThreshold("CpuPercentage", 85.0, "greaterequal", 15);
+            
+            bool highCpuDetected = highCpuDetectedFromMetrics;
+            string? highCpuMessage = null;
+            
+            if (highCpuDetectedFromMetrics)
+            {
+                // Get detailed metrics to show the actual values
+                var metrics = await GetApplicationMetricsAsync(new[] { "CpuPercentage" }, 15);
+                if (metrics.ContainsKey("CpuPercentage") && metrics["CpuPercentage"].Count > 0)
+                {
+                    var recentDataPoints = metrics["CpuPercentage"]
+                        .Where(dp => dp.timestamp >= DateTime.UtcNow.AddMinutes(-15))
+                        .OrderByDescending(dp => dp.timestamp)
+                        .ToList();
+                    
+                    if (recentDataPoints.Count > 0)
+                    {
+                        var maxCpu = recentDataPoints.Max(dp => dp.value);
+                        var avgCpu = recentDataPoints.Average(dp => dp.value);
+                        var latestCpu = recentDataPoints.First().value;
+                        
+                        highCpuMessage = $"CPU usage exceeded 85% - Latest: {latestCpu:F1}%, Average: {avgCpu:F1}%, Peak: {maxCpu:F1}%";
+                        Console.WriteLine($"✓ High CPU usage detected from metrics: {highCpuMessage}");
+                    }
+                }
+            }
+            else
+            {
+                Console.WriteLine("ℹ️  CPU metrics show usage below 85% threshold, checking application logs for CPU issues...");
+                
+                // Fallback: Get application logs to check for CPU-related errors
+                var (consoleLogs, httpLogs) = await GetApplicationLogsAsync(15); // Last 15 minutes
+                
+                // Look for high CPU usage indicators in console logs
+                foreach (var logEntry in consoleLogs)
+                {
+                    var lowerLogEntry = logEntry.ToLower();
+                    
+                    // Check for CPU usage patterns
+                    if (lowerLogEntry.Contains("cpu") && 
+                        (lowerLogEntry.Contains("90%") || lowerLogEntry.Contains("85%") || lowerLogEntry.Contains("high") || 
+                         lowerLogEntry.Contains("exceeded") || lowerLogEntry.Contains("critical")))
+                    {
+                        highCpuDetected = true;
+                        highCpuMessage = logEntry;
+                        Console.WriteLine($"✓ High CPU usage detected in logs: {logEntry}");
+                        break;
+                    }
+                    
+                    // Check for CPU throttling or performance issues
+                    if (lowerLogEntry.Contains("cpu throttling") || lowerLogEntry.Contains("performance") && lowerLogEntry.Contains("degraded"))
+                    {
+                        highCpuDetected = true;
+                        highCpuMessage = logEntry;
+                        Console.WriteLine($"✓ CPU performance issue detected: {logEntry}");
+                        break;
+                    }
+                    
+                    // Check for CPU pressure indicators
+                    if ((lowerLogEntry.Contains("cpu pressure") || lowerLogEntry.Contains("high load")) ||
+                        (lowerLogEntry.Contains("processing") && lowerLogEntry.Contains("slow")))
+                    {
+                        highCpuDetected = true;
+                        highCpuMessage = logEntry;
+                        Console.WriteLine($"✓ CPU pressure detected: {logEntry}");
+                        break;
+                    }
+                }
+            }
+            
+            // If high CPU detected, restart the app
+            if (highCpuDetected)
+            {
+                Console.WriteLine($"🔴 High CPU usage confirmed: {highCpuMessage ?? "CPU usage >= 85%"}");
+                Console.WriteLine("Restarting application to clear CPU-intensive processes...");
+                
+                await RestartApp();
+                
+                Console.WriteLine("Waiting 30 seconds for app to restart and stabilize...");
+                await Task.Delay(30000);
+                
+                // Verify the app is working after restart
+                try
+                {
+                    await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+                    Console.WriteLine("✓ Application recovery successful after restart");
+                    
+                    // Optional: Check if CPU usage improved after restart
+                    Console.WriteLine("Checking CPU usage after restart...");
+                    await Task.Delay(30000); // Wait a bit more for metrics to update
+                    
+                    var postRestartCpuHigh = await CheckMetricThreshold("CpuPercentage", 85.0, "greaterequal", 5);
+                    if (!postRestartCpuHigh)
+                    {
+                        Console.WriteLine("✓ CPU usage improved after restart");
+                    }
+                    else
+                    {
+                        Console.WriteLine("⚠️  CPU usage still high after restart - may need further investigation");
+                    }
+                    
+                    return true;
+                }
+                catch (Exception verifyEx)
+                {
+                    Console.WriteLine($"⚠️  Application still having issues after restart: {verifyEx.Message}");
+                    Console.WriteLine("Waiting additional 60 seconds for CPU to stabilize...");
+                    await Task.Delay(60000);
+                    return false;
+                }
+            }
+            else
+            {
+                Console.WriteLine("ℹ️  No high CPU usage detected (< 85% threshold)");
+                Console.WriteLine("Waiting 60 seconds for CPU to stabilize naturally...");
+                await Task.Delay(60000);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error analyzing CPU metrics: {ex.Message}");
+            Console.WriteLine("Falling back to standard CPU stabilization wait...");
+            await Task.Delay(60000);
+            return false;
+        }
     }
 }
 
