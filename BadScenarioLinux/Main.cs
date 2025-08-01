@@ -2295,6 +2295,7 @@ public class SqlConnectionRejectedScenario : ScenarioBase
     {
         Console.WriteLine("Simulating private endpoint connection restoration...");
         await Task.Delay(5000);
+        return true;
     }
 }
 
@@ -2315,6 +2316,7 @@ public class SqlServerNotRespondingScenario : ScenarioBase
     {
         Console.WriteLine("Simulating PostgreSQL server start...");
         await Task.Delay(5000);
+        return true;
     }
 }
 
@@ -2335,6 +2337,7 @@ public class FirewallBlocksConnectionScenario : ScenarioBase
     {
         Console.WriteLine("Simulating firewall rule removal...");
         await Task.Delay(5000);
+        return true;
     }
 }
 
@@ -2355,6 +2358,7 @@ public class MissingDependencyScenario : ScenarioBase
     {
         Console.WriteLine("Simulating slot swap back to working version...");
         await Task.Delay(5000);
+        return true;
     }
 }
 
@@ -2493,6 +2497,8 @@ public class VNetIntegrationBreaksConnectivityScenario : ScenarioBase
         
         Console.WriteLine("Waiting 30 seconds for app to restart...");
         await Task.Delay(30000);
+        
+        return true;
     }
     
     private async Task ReconnectVNetIntegrationManually(HttpClient httpClient, string accessToken)
