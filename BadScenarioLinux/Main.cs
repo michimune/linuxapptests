@@ -1930,12 +1930,180 @@ public class MisconfiguredConnectionStringScenario : ScenarioBase
 
     public override async Task<bool> Recover()
     {
-        if (_savedValue != null)
+        Console.WriteLine("Testing application state to identify misconfigured connection string...");
+        
+        try
         {
-            await UpdateAppSetting("DATABASE_URL", _savedValue);
-            Console.WriteLine("Restored correct DATABASE_URL");
-            await Task.Delay(30000); // Wait 30 seconds
+            // First, try to make an HTTP request to see the current state
+            await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+            Console.WriteLine("⚠️  Application appears to be working, no connection string issue detected");
+            return true;
         }
+        catch (Exception httpEx)
+        {
+            Console.WriteLine($"✓ Confirmed application failure: {httpEx.Message}");
+            
+            // Get application logs to find the specific error
+            var (consoleLogs, httpLogs) = await GetApplicationLogsAsync(10); // Last 10 minutes
+            
+            string? misconfiguredConnectionStringName = null;
+            
+            // Look for connection string errors in console logs (adapted for misconfiguration)
+            foreach (var logEntry in consoleLogs)
+            {
+                var lowerLogEntry = logEntry.ToLower();
+                
+                // Check for various patterns of connection string errors
+                if (lowerLogEntry.Contains("database connection") && 
+                    (lowerLogEntry.Contains("failed") || lowerLogEntry.Contains("error") || lowerLogEntry.Contains("invalid") || 
+                     lowerLogEntry.Contains("cannot connect") || lowerLogEntry.Contains("timeout")))
+                {
+                    // Try to extract connection string name from the log message
+                    misconfiguredConnectionStringName = ExtractConnectionStringNameFromLog(logEntry);
+                    if (!string.IsNullOrEmpty(misconfiguredConnectionStringName))
+                    {
+                        Console.WriteLine($"✓ Identified misconfigured database connection string: {misconfiguredConnectionStringName}");
+                        break;
+                    }
+                }
+                
+                // Check for database connection errors (host not found, invalid credentials, etc.)
+                if ((lowerLogEntry.Contains("database") || lowerLogEntry.Contains("connection")) && 
+                    (lowerLogEntry.Contains("host") || lowerLogEntry.Contains("server")) &&
+                    (lowerLogEntry.Contains("not found") || lowerLogEntry.Contains("unknown") || lowerLogEntry.Contains("invalid") ||
+                     lowerLogEntry.Contains("timeout") || lowerLogEntry.Contains("refused")))
+                {
+                    misconfiguredConnectionStringName = ExtractConnectionStringNameFromLog(logEntry);
+                    if (!string.IsNullOrEmpty(misconfiguredConnectionStringName))
+                    {
+                        Console.WriteLine($"✓ Identified misconfigured connection string: {misconfiguredConnectionStringName}");
+                        break;
+                    }
+                }
+                
+                // Check for specific DATABASE_URL errors (since this scenario modifies DATABASE_URL)
+                if (lowerLogEntry.Contains("database_url") && 
+                    (lowerLogEntry.Contains("invalid") || lowerLogEntry.Contains("failed") || lowerLogEntry.Contains("error") ||
+                     lowerLogEntry.Contains("host") || lowerLogEntry.Contains("connection")))
+                {
+                    misconfiguredConnectionStringName = "DATABASE_URL";
+                    Console.WriteLine($"✓ Identified misconfigured connection string: {misconfiguredConnectionStringName}");
+                    break;
+                }
+                
+                // Check for PostgreSQL connection errors (invalid host, etc.)
+                if ((lowerLogEntry.Contains("postgresql") || lowerLogEntry.Contains("postgres")) && 
+                    (lowerLogEntry.Contains("connection") || lowerLogEntry.Contains("connect")) &&
+                    (lowerLogEntry.Contains("failed") || lowerLogEntry.Contains("error") || lowerLogEntry.Contains("invalid") ||
+                     lowerLogEntry.Contains("host") || lowerLogEntry.Contains("timeout") || lowerLogEntry.Contains("refused")))
+                {
+                    misconfiguredConnectionStringName = "DATABASE_URL"; // Default for this scenario
+                    Console.WriteLine($"✓ Identified PostgreSQL connection issue, assuming DATABASE_URL: {misconfiguredConnectionStringName}");
+                    break;
+                }
+                
+                // Check for specific host resolution errors
+                if (lowerLogEntry.Contains("invalid-host-name") || 
+                    (lowerLogEntry.Contains("host") && (lowerLogEntry.Contains("not found") || lowerLogEntry.Contains("unknown"))))
+                {
+                    misconfiguredConnectionStringName = "DATABASE_URL"; // This scenario uses invalid host name
+                    Console.WriteLine($"✓ Identified host resolution issue, assuming DATABASE_URL: {misconfiguredConnectionStringName}");
+                    break;
+                }
+            }
+            
+            // If no specific connection string found in logs, return false
+            if (string.IsNullOrEmpty(misconfiguredConnectionStringName))
+            {
+                Console.WriteLine("⚠️  Could not extract connection string name from logs, unable to proceed with recovery");
+                return false;
+            }
+            
+            // Restore the correct connection string
+            if (_savedValue != null && !string.IsNullOrEmpty(misconfiguredConnectionStringName))
+            {
+                Console.WriteLine($"Restoring correct database connection string '{misconfiguredConnectionStringName}' with saved value...");
+                await UpdateAppSetting(misconfiguredConnectionStringName, _savedValue);
+                Console.WriteLine($"✓ Restored {misconfiguredConnectionStringName} app setting");
+                
+                // Wait for the change to take effect
+                await Task.Delay(30000);
+                
+                // Verify the fix worked
+                try
+                {
+                    await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+                    Console.WriteLine($"✓ Application recovery successful after restoring {misconfiguredConnectionStringName}");
+                    return true;
+                }
+                catch (Exception verifyEx)
+                {
+                    Console.WriteLine($"⚠️  Application still failing after restoring {misconfiguredConnectionStringName}: {verifyEx.Message}");
+                    return false;
+                }
+            }
+            else
+            {
+                Console.WriteLine("⚠️  Cannot restore connection string: no saved value available");
+                return false;
+            }
+        }
+    }
+    
+    private string? ExtractConnectionStringNameFromLog(string logEntry)
+    {
+        try
+        {
+            // Try various patterns to extract connection string name (similar to MissingConnectionStringScenario)
+            var patterns = new[]
+            {
+                @"database connection string['\s]*([A-Z_]+)['\s]*",
+                @"connection string['\s]*([A-Z_]+)['\s]*",
+                @"([A-Z_]+)['\s]*connection string['\s]*",
+                @"([A-Z_]+)['\s]*database['\s]*connection['\s]*",
+                @"database['\s]*([A-Z_]+)['\s]*",
+                @"([A-Z_]+)['\s]*connection['\s]*",
+                @"DATABASE_URL", // Specific for this scenario
+                @"CONNECTION_STRING",
+                @"DB_CONNECTION",
+            };
+            
+            foreach (var pattern in patterns)
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(logEntry, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (match.Success)
+                {
+                    if (pattern == "DATABASE_URL" || pattern == "CONNECTION_STRING" || pattern == "DB_CONNECTION")
+                    {
+                        return pattern;
+                    }
+                    else if (match.Groups.Count > 1 && !string.IsNullOrEmpty(match.Groups[1].Value))
+                    {
+                        var connectionStringName = match.Groups[1].Value.Trim('\'', '"', ' ').ToUpper();
+                        if (IsValidConnectionStringName(connectionStringName))
+                        {
+                            return connectionStringName;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error extracting connection string name from log: {ex.Message}");
+        }
+        
+        return null;
+    }
+    
+    private bool IsValidConnectionStringName(string name)
+    {
+        // Check if the extracted name looks like a valid connection string name
+        return !string.IsNullOrEmpty(name) && 
+               name.Length > 1 && 
+               name.All(c => char.IsLetterOrDigit(c) || c == '_') &&
+               char.IsLetter(name[0]) &&
+               (name.Contains("DATABASE") || name.Contains("CONNECTION") || name.Contains("DB") || name.Contains("URL"));
     }
 }
 
@@ -1987,6 +2155,8 @@ public class SpecificApiPathsFailingScenario : ScenarioBase
         
         Console.WriteLine("Waiting 30 seconds for app to restart...");
         await Task.Delay(30000);
+        
+        return true;
     }
 
     public override async Task Finalize()
@@ -2018,16 +2188,90 @@ public class MissingEntryPointScenario : ScenarioBase
 
     public override async Task<bool> Recover()
     {
-        Console.WriteLine("Removing startup command setting and restarting app...");
-        
-        // Remove the startup command setting
-        await RemoveAppSetting("AZURE_WEBAPP_STARTUP_COMMAND");
-        
-        // Restart the app
-        await RestartApp();
-        
-        Console.WriteLine("Waiting 30 seconds for app to restart...");
-        await Task.Delay(30000);
+        try
+        {
+            // Use the CheckDockerStartupFailure method to detect startup issues
+            var (startupFailureDetected, failureMessage) = await CheckDockerStartupFailure(15);
+            
+            if (startupFailureDetected)
+            {
+                Console.WriteLine($"🔴 Startup command failure confirmed: {failureMessage}");
+                Console.WriteLine("Attempting to recover by using staging slot's startup command...");
+                
+                try
+                {
+                    // Try to get the correct startup command from staging slot
+                    string? correctStartupCommand = await GetStartupCommandFromStagingSlot();
+                    
+                    if (!string.IsNullOrEmpty(correctStartupCommand))
+                    {
+                        Console.WriteLine($"✓ Found correct startup command from staging slot: {correctStartupCommand}");
+                        await SetAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", correctStartupCommand);
+                        Console.WriteLine("✓ Updated startup command with staging slot configuration");
+                    }
+                    else
+                    {
+                        Console.WriteLine("⚠️  No staging slot startup command found, removing incorrect startup command");
+                        await RemoveAppSetting("AZURE_WEBAPP_STARTUP_COMMAND");
+                        Console.WriteLine("✓ Removed incorrect startup command");
+                    }
+                    
+                    // Restart the app
+                    await RestartApp();
+                    
+                    Console.WriteLine("Waiting 30 seconds for app to restart with corrected startup command...");
+                    await Task.Delay(30000);
+                    
+                    // Verify the app is working after restart
+                    try
+                    {
+                        await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+                        Console.WriteLine("✓ Application recovery successful after correcting startup command");
+                        return true;
+                    }
+                    catch (Exception verifyEx)
+                    {
+                        Console.WriteLine($"⚠️  Application still having issues after startup command correction: {verifyEx.Message}");
+                        Console.WriteLine("Waiting additional 30 seconds for startup to complete...");
+                        await Task.Delay(30000);
+                        return false;
+                    }
+                }
+                catch (Exception recoveryEx)
+                {
+                    Console.WriteLine($"⚠️  Error during startup command recovery: {recoveryEx.Message}");
+                    Console.WriteLine("Falling back to removing startup command entirely...");
+                    
+                    await RemoveAppSetting("AZURE_WEBAPP_STARTUP_COMMAND");
+                    await RestartApp();
+                    await Task.Delay(30000);
+                    return false;
+                }
+            }
+            else
+            {
+                Console.WriteLine("ℹ️  No startup command failures detected in logs");
+                Console.WriteLine("Removing potentially incorrect startup command as precaution...");
+                
+                await RemoveAppSetting("AZURE_WEBAPP_STARTUP_COMMAND");
+                Console.WriteLine("✓ Removed startup command setting");
+                
+                await RestartApp();
+                Console.WriteLine("Waiting 30 seconds for app to restart...");
+                await Task.Delay(30000);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error analyzing startup command issues: {ex.Message}");
+            Console.WriteLine("Falling back to removing startup command...");
+            
+            await RemoveAppSetting("AZURE_WEBAPP_STARTUP_COMMAND");
+            Console.WriteLine("✓ Removed startup command setting as fallback");
+            await Task.Delay(30000);
+            return false;
+        }
     }
 }
 
