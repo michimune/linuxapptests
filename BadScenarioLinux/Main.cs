@@ -966,6 +966,64 @@ public abstract class ScenarioBase
             return null;
         }
     }
+
+    protected async Task<(bool isStartupFailure, string? failureMessage)> CheckDockerStartupFailure(int lastMinutes = 15)
+    {
+        try
+        {
+            Console.WriteLine("Analyzing application logs to identify startup command issues...");
+            
+            // Get application logs to find startup command errors
+            var (consoleLogs, httpLogs) = await GetApplicationLogsAsync(lastMinutes);
+            
+            // Look for Docker container startup failure indicators in console logs
+            foreach (var logEntry in consoleLogs)
+            {
+                var lowerLogEntry = logEntry.ToLower();
+                
+                // Check for Docker container startup failures
+                if (lowerLogEntry.Contains("docker") && 
+                    (lowerLogEntry.Contains("failed to start") || lowerLogEntry.Contains("container start failed") || 
+                     lowerLogEntry.Contains("startup command failed") || lowerLogEntry.Contains("command not found")))
+                {
+                    Console.WriteLine($"✓ Docker container startup failure detected: {logEntry}");
+                    return (true, logEntry);
+                }
+                
+                // Check for startup command execution errors
+                if ((lowerLogEntry.Contains("startup command") || lowerLogEntry.Contains("start command")) && 
+                    (lowerLogEntry.Contains("error") || lowerLogEntry.Contains("failed") || lowerLogEntry.Contains("not found")))
+                {
+                    Console.WriteLine($"✓ Startup command execution error detected: {logEntry}");
+                    return (true, logEntry);
+                }
+                
+                // Check for process execution failures
+                if (lowerLogEntry.Contains("process") && 
+                    (lowerLogEntry.Contains("exited") || lowerLogEntry.Contains("terminated") || lowerLogEntry.Contains("crashed")) &&
+                    (lowerLogEntry.Contains("code") || lowerLogEntry.Contains("error")))
+                {
+                    Console.WriteLine($"✓ Process execution failure detected: {logEntry}");
+                    return (true, logEntry);
+                }
+                
+                // Check for specific command not found errors
+                if (lowerLogEntry.Contains("command not found") || lowerLogEntry.Contains("no such file or directory"))
+                {
+                    Console.WriteLine($"✓ Command not found error detected: {logEntry}");
+                    return (true, logEntry);
+                }
+            }
+            
+            Console.WriteLine("ℹ️  No startup command failures detected in logs");
+            return (false, null);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error analyzing startup command issues: {ex.Message}");
+            return (false, null);
+        }
+    }
 }
 
 // Scenario implementations
@@ -1606,62 +1664,10 @@ public class IncorrectStartupCommandScenario : ScenarioBase
 
     public override async Task<bool> Recover()
     {
-        Console.WriteLine("Analyzing application logs to identify startup command issues...");
-        
         try
         {
-            // Get application logs to find startup command errors
-            var (consoleLogs, httpLogs) = await GetApplicationLogsAsync(15); // Last 15 minutes
-            
-            bool startupFailureDetected = false;
-            string? failureMessage = null;
-            
-            // Look for Docker container startup failure indicators in console logs
-            foreach (var logEntry in consoleLogs)
-            {
-                var lowerLogEntry = logEntry.ToLower();
-                
-                // Check for Docker container startup failures
-                if (lowerLogEntry.Contains("docker") && 
-                    (lowerLogEntry.Contains("failed to start") || lowerLogEntry.Contains("container start failed") || 
-                     lowerLogEntry.Contains("startup command failed") || lowerLogEntry.Contains("command not found")))
-                {
-                    startupFailureDetected = true;
-                    failureMessage = logEntry;
-                    Console.WriteLine($"✓ Docker container startup failure detected: {logEntry}");
-                    break;
-                }
-                
-                // Check for startup command execution errors
-                if ((lowerLogEntry.Contains("startup command") || lowerLogEntry.Contains("start command")) && 
-                    (lowerLogEntry.Contains("error") || lowerLogEntry.Contains("failed") || lowerLogEntry.Contains("not found")))
-                {
-                    startupFailureDetected = true;
-                    failureMessage = logEntry;
-                    Console.WriteLine($"✓ Startup command execution error detected: {logEntry}");
-                    break;
-                }
-                
-                // Check for process execution failures
-                if (lowerLogEntry.Contains("process") && 
-                    (lowerLogEntry.Contains("exited") || lowerLogEntry.Contains("terminated") || lowerLogEntry.Contains("crashed")) &&
-                    (lowerLogEntry.Contains("code") || lowerLogEntry.Contains("error")))
-                {
-                    startupFailureDetected = true;
-                    failureMessage = logEntry;
-                    Console.WriteLine($"✓ Process execution failure detected: {logEntry}");
-                    break;
-                }
-                
-                // Check for specific command not found errors
-                if (lowerLogEntry.Contains("command not found") || lowerLogEntry.Contains("no such file or directory"))
-                {
-                    startupFailureDetected = true;
-                    failureMessage = logEntry;
-                    Console.WriteLine($"✓ Command not found error detected: {logEntry}");
-                    break;
-                }
-            }
+            // Use the new CheckDockerStartupFailure method
+            var (startupFailureDetected, failureMessage) = await CheckDockerStartupFailure(15);
             
             if (startupFailureDetected)
             {
