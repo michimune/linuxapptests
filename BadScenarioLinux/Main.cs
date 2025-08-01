@@ -2719,6 +2719,8 @@ public class MisconfiguredDnsScenario : ScenarioBase
         
         Console.WriteLine("Waiting 30 seconds for app to restart...");
         await Task.Delay(30000);
+        
+        return true;
     }
     
     private async Task RestoreDnsManually(HttpClient httpClient, string accessToken)
@@ -2856,6 +2858,8 @@ public class IncorrectDockerImageScenario : ScenarioBase
         
         Console.WriteLine("Waiting 30 seconds for app to restart...");
         await Task.Delay(30000);
+        
+        return true;
     }
 }
 
@@ -2890,6 +2894,7 @@ public class IncorrectWriteAccessScenario : ScenarioBase
         await Task.Delay(30000);
         
         Console.WriteLine("✓ Recovery wait period completed");
+        return true;
     }
 }
 
@@ -3220,6 +3225,8 @@ public class AppRestartsTriggeredByAutoHealScenario : ScenarioBase
             Console.WriteLine("Falling back to simulation...");
             await RemoveAppSetting("_SCENARIO_AUTOHEAL_MEMORY_ENABLED");
         }
+        
+        return true;
     }
 }
 
@@ -3507,6 +3514,8 @@ public class PoorlyTunedAutoHealRulesScenario : ScenarioBase
             
             Console.WriteLine("✓ Auto-heal rule disabled (simulated)");
         }
+        
+        return true;
     }
 }
 
@@ -3798,6 +3807,8 @@ public class ColdStartsAfterScaleOutScenario : ScenarioBase
             Console.WriteLine("Falling back to simulation...");
             await RemoveAppSetting("_SCENARIO_SCALED_OUT");
         }
+        
+        return true;
     }
 }
 
@@ -3872,5 +3883,6 @@ public class PublishBrokenZipFileScenario : ScenarioBase
         
         await RestartApp();
         Console.WriteLine("Recovery complete: normal zip file deployed and app restarted");
+        return true;
     }
 }
