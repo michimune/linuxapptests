@@ -239,10 +239,11 @@ public abstract class ScenarioBase
         await MakeHttpRequest(TargetAddress, expectedSuccess: false);
     }
 
-    public virtual async Task Recover()
+    public virtual async Task<bool> Recover()
     {
         // Default implementation - do nothing
         await Task.CompletedTask;
+        return true;
     }
 
     public virtual async Task Finalize()
@@ -406,6 +407,505 @@ public abstract class ScenarioBase
         await webApp.RestartAsync();
         Console.WriteLine("✓ App service restarted");
     }
+
+    protected async Task<(List<string> consoleLogs, List<string> httpLogs)> GetApplicationLogsAsync(int lastMinutes = 30)
+    {
+        var consoleLogs = new List<string>();
+        var httpLogs = new List<string>();
+        
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Try Application Insights first
+            var (appInsightsConsoleLogs, appInsightsHttpLogs) = await TryGetApplicationInsightsLogsAsync(httpClient, lastMinutes);
+            
+            if (appInsightsConsoleLogs.Count > 0 || appInsightsHttpLogs.Count > 0)
+            {
+                Console.WriteLine($"✓ Retrieved {appInsightsConsoleLogs.Count} console logs and {appInsightsHttpLogs.Count} HTTP logs from Application Insights");
+                return (appInsightsConsoleLogs, appInsightsHttpLogs);
+            }
+            
+            // Fallback to Log Analytics workspace
+            Console.WriteLine("⚠️  No logs found in Application Insights, falling back to Log Analytics workspace...");
+            var (logAnalyticsConsoleLogs, logAnalyticsHttpLogs) = await TryGetLogAnalyticsLogsAsync(httpClient, lastMinutes);
+            
+            if (logAnalyticsConsoleLogs.Count > 0 || logAnalyticsHttpLogs.Count > 0)
+            {
+                Console.WriteLine($"✓ Retrieved {logAnalyticsConsoleLogs.Count} console logs and {logAnalyticsHttpLogs.Count} HTTP logs from Log Analytics workspace");
+                return (logAnalyticsConsoleLogs, logAnalyticsHttpLogs);
+            }
+            
+            Console.WriteLine("⚠️  No logs found in either Application Insights or Log Analytics workspace");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error retrieving application logs: {ex.Message}");
+        }
+        
+        return (consoleLogs, httpLogs);
+    }
+    
+    private async Task<(List<string> consoleLogs, List<string> httpLogs)> TryGetApplicationInsightsLogsAsync(HttpClient httpClient, int lastMinutes)
+    {
+        var consoleLogs = new List<string>();
+        var httpLogs = new List<string>();
+        
+        try
+        {
+            // First, get the Application Insights component associated with the web app
+            var webApp = await GetWebAppResource();
+            var appSettings = await webApp.GetApplicationSettingsAsync();
+            
+            string? appInsightsConnectionString = null;
+            string? instrumentationKey = null;
+            
+            // Check for Application Insights connection string or instrumentation key
+            if (appSettings.Value.Properties.TryGetValue("APPLICATIONINSIGHTS_CONNECTION_STRING", out var connString))
+            {
+                appInsightsConnectionString = connString;
+            }
+            else if (appSettings.Value.Properties.TryGetValue("APPINSIGHTS_INSTRUMENTATIONKEY", out var instrKey))
+            {
+                instrumentationKey = instrKey;
+            }
+            
+            if (string.IsNullOrEmpty(appInsightsConnectionString) && string.IsNullOrEmpty(instrumentationKey))
+            {
+                Console.WriteLine("⚠️  No Application Insights configuration found in app settings");
+                return (consoleLogs, httpLogs);
+            }
+            
+            // Extract Application Insights resource information
+            string? appInsightsResourceId = null;
+            if (!string.IsNullOrEmpty(appInsightsConnectionString))
+            {
+                // Parse connection string to get instrumentation key
+                var parts = appInsightsConnectionString.Split(';');
+                foreach (var part in parts)
+                {
+                    if (part.StartsWith("InstrumentationKey="))
+                    {
+                        instrumentationKey = part.Substring("InstrumentationKey=".Length);
+                        break;
+                    }
+                }
+            }
+            
+            if (string.IsNullOrEmpty(instrumentationKey))
+            {
+                Console.WriteLine("⚠️  Could not extract instrumentation key from Application Insights configuration");
+                return (consoleLogs, httpLogs);
+            }
+            
+            // Find Application Insights resource by instrumentation key
+            var appInsightsResourceSearchUrl = $"https://management.azure.com/subscriptions/{SubscriptionId}/providers/Microsoft.Insights/components?api-version=2020-02-02";
+            var searchResponse = await httpClient.GetAsync(appInsightsResourceSearchUrl);
+            
+            if (!searchResponse.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"⚠️  Failed to search for Application Insights resources (Status: {(int)searchResponse.StatusCode})");
+                return (consoleLogs, httpLogs);
+            }
+            
+            var searchContent = await searchResponse.Content.ReadAsStringAsync();
+            using var searchDoc = JsonDocument.Parse(searchContent);
+            var components = searchDoc.RootElement.GetProperty("value");
+            
+            foreach (var component in components.EnumerateArray())
+            {
+                var properties = component.GetProperty("properties");
+                if (properties.TryGetProperty("InstrumentationKey", out var keyElement) && 
+                    keyElement.GetString() == instrumentationKey)
+                {
+                    appInsightsResourceId = component.GetProperty("id").GetString();
+                    break;
+                }
+            }
+            
+            if (string.IsNullOrEmpty(appInsightsResourceId))
+            {
+                Console.WriteLine("⚠️  Could not find Application Insights resource with matching instrumentation key");
+                return (consoleLogs, httpLogs);
+            }
+            
+            // Query Application Insights for console and HTTP logs
+            var timeAgo = DateTime.UtcNow.AddMinutes(-lastMinutes).ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            
+            // Query for console logs (traces)
+            var consoleQuery = $@"
+                traces
+                | where timestamp >= datetime({timeAgo})
+                | where cloud_RoleName contains '{WebAppName}'
+                | order by timestamp desc
+                | project timestamp, message, severityLevel
+                | take 100";
+            
+            var consoleQueryUrl = $"https://api.applicationinsights.io/v1/apps/{instrumentationKey}/query";
+            var consoleQueryContent = new StringContent(JsonSerializer.Serialize(new { query = consoleQuery }), System.Text.Encoding.UTF8, "application/json");
+            
+            var consoleResponse = await httpClient.PostAsync(consoleQueryUrl, consoleQueryContent);
+            if (consoleResponse.IsSuccessStatusCode)
+            {
+                var consoleJson = await consoleResponse.Content.ReadAsStringAsync();
+                using var consoleDoc = JsonDocument.Parse(consoleJson);
+                
+                if (consoleDoc.RootElement.TryGetProperty("tables", out var consoleTables) && consoleTables.GetArrayLength() > 0)
+                {
+                    var consoleTable = consoleTables[0];
+                    if (consoleTable.TryGetProperty("rows", out var consoleRows))
+                    {
+                        foreach (var row in consoleRows.EnumerateArray())
+                        {
+                            var timestamp = row[0].GetString();
+                            var message = row[1].GetString();
+                            var severity = row[2].GetString();
+                            consoleLogs.Add($"[{timestamp}] [{severity}] {message}");
+                        }
+                    }
+                }
+            }
+            
+            // Query for HTTP logs (requests)
+            var httpQuery = $@"
+                requests
+                | where timestamp >= datetime({timeAgo})
+                | where cloud_RoleName contains '{WebAppName}'
+                | order by timestamp desc
+                | project timestamp, name, url, resultCode, duration, success
+                | take 100";
+            
+            var httpQueryContent = new StringContent(JsonSerializer.Serialize(new { query = httpQuery }), System.Text.Encoding.UTF8, "application/json");
+            
+            var httpResponse = await httpClient.PostAsync(consoleQueryUrl, httpQueryContent);
+            if (httpResponse.IsSuccessStatusCode)
+            {
+                var httpJson = await httpResponse.Content.ReadAsStringAsync();
+                using var httpDoc = JsonDocument.Parse(httpJson);
+                
+                if (httpDoc.RootElement.TryGetProperty("tables", out var httpTables) && httpTables.GetArrayLength() > 0)
+                {
+                    var httpTable = httpTables[0];
+                    if (httpTable.TryGetProperty("rows", out var httpRows))
+                    {
+                        foreach (var row in httpRows.EnumerateArray())
+                        {
+                            var timestamp = row[0].GetString();
+                            var name = row[1].GetString();
+                            var url = row[2].GetString();
+                            var resultCode = row[3].GetString();
+                            var duration = row[4].GetString();
+                            var success = row[5].GetBoolean();
+                            httpLogs.Add($"[{timestamp}] {name} {url} -> {resultCode} ({duration}ms) Success: {success}");
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error querying Application Insights: {ex.Message}");
+        }
+        
+        return (consoleLogs, httpLogs);
+    }
+    
+    private async Task<(List<string> consoleLogs, List<string> httpLogs)> TryGetLogAnalyticsLogsAsync(HttpClient httpClient, int lastMinutes)
+    {
+        var consoleLogs = new List<string>();
+        var httpLogs = new List<string>();
+        
+        try
+        {
+            // Find Log Analytics workspace associated with the resource group or web app
+            var workspacesUrl = $"https://management.azure.com/subscriptions/{SubscriptionId}/resourceGroups/{ResourceGroupName}/providers/Microsoft.OperationalInsights/workspaces?api-version=2021-06-01";
+            var workspacesResponse = await httpClient.GetAsync(workspacesUrl);
+            
+            if (!workspacesResponse.IsSuccessStatusCode)
+            {
+                // Try subscription-wide search if resource group search fails
+                workspacesUrl = $"https://management.azure.com/subscriptions/{SubscriptionId}/providers/Microsoft.OperationalInsights/workspaces?api-version=2021-06-01";
+                workspacesResponse = await httpClient.GetAsync(workspacesUrl);
+            }
+            
+            if (!workspacesResponse.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"⚠️  Failed to search for Log Analytics workspaces (Status: {(int)workspacesResponse.StatusCode})");
+                return (consoleLogs, httpLogs);
+            }
+            
+            var workspacesContent = await workspacesResponse.Content.ReadAsStringAsync();
+            using var workspacesDoc = JsonDocument.Parse(workspacesContent);
+            var workspaces = workspacesDoc.RootElement.GetProperty("value");
+            
+            if (workspaces.GetArrayLength() == 0)
+            {
+                Console.WriteLine("⚠️  No Log Analytics workspaces found");
+                return (consoleLogs, httpLogs);
+            }
+            
+            // Use the first available workspace
+            var workspace = workspaces[0];
+            var workspaceId = workspace.GetProperty("properties").GetProperty("customerId").GetString();
+            var workspaceResourceId = workspace.GetProperty("id").GetString();
+            
+            if (string.IsNullOrEmpty(workspaceId))
+            {
+                Console.WriteLine("⚠️  Could not get workspace ID from Log Analytics workspace");
+                return (consoleLogs, httpLogs);
+            }
+            
+            // Query Log Analytics for console and HTTP logs
+            var timeAgo = DateTime.UtcNow.AddMinutes(-lastMinutes).ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            
+            // Query for console logs from App Service logs
+            var consoleQuery = $@"
+                AppServiceConsoleLogs_CL
+                | where TimeGenerated >= datetime({timeAgo})
+                | where ResultDescription contains '{WebAppName}'
+                | order by TimeGenerated desc
+                | project TimeGenerated, ResultDescription
+                | take 100";
+            
+            var queryUrl = $"https://api.loganalytics.io/v1/workspaces/{workspaceId}/query";
+            var consoleQueryContent = new StringContent(JsonSerializer.Serialize(new { query = consoleQuery }), System.Text.Encoding.UTF8, "application/json");
+            
+            var consoleResponse = await httpClient.PostAsync(queryUrl, consoleQueryContent);
+            if (consoleResponse.IsSuccessStatusCode)
+            {
+                var consoleJson = await consoleResponse.Content.ReadAsStringAsync();
+                using var consoleDoc = JsonDocument.Parse(consoleJson);
+                
+                if (consoleDoc.RootElement.TryGetProperty("tables", out var consoleTables) && consoleTables.GetArrayLength() > 0)
+                {
+                    var consoleTable = consoleTables[0];
+                    if (consoleTable.TryGetProperty("rows", out var consoleRows))
+                    {
+                        foreach (var row in consoleRows.EnumerateArray())
+                        {
+                            var timestamp = row[0].GetString();
+                            var message = row[1].GetString();
+                            consoleLogs.Add($"[{timestamp}] {message}");
+                        }
+                    }
+                }
+            }
+            
+            // Query for HTTP logs from App Service HTTP logs
+            var httpQuery = $@"
+                AppServiceHTTPLogs_CL
+                | where TimeGenerated >= datetime({timeAgo})
+                | where CsHost contains '{WebAppName}'
+                | order by TimeGenerated desc
+                | project TimeGenerated, CsMethod, CsUriStem, ScStatus, TimeTaken
+                | take 100";
+            
+            var httpQueryContent = new StringContent(JsonSerializer.Serialize(new { query = httpQuery }), System.Text.Encoding.UTF8, "application/json");
+            
+            var httpResponse = await httpClient.PostAsync(queryUrl, httpQueryContent);
+            if (httpResponse.IsSuccessStatusCode)
+            {
+                var httpJson = await httpResponse.Content.ReadAsStringAsync();
+                using var httpDoc = JsonDocument.Parse(httpJson);
+                
+                if (httpDoc.RootElement.TryGetProperty("tables", out var httpTables) && httpTables.GetArrayLength() > 0)
+                {
+                    var httpTable = httpTables[0];
+                    if (httpTable.TryGetProperty("rows", out var httpRows))
+                    {
+                        foreach (var row in httpRows.EnumerateArray())
+                        {
+                            var timestamp = row[0].GetString();
+                            var method = row[1].GetString();
+                            var uriStem = row[2].GetString();
+                            var status = row[3].GetString();
+                            var timeTaken = row[4].GetString();
+                            httpLogs.Add($"[{timestamp}] {method} {uriStem} -> {status} ({timeTaken}ms)");
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error querying Log Analytics workspace: {ex.Message}");
+        }
+        
+        return (consoleLogs, httpLogs);
+    }
+
+    protected async Task<Dictionary<string, List<(DateTime timestamp, double value)>>> GetApplicationMetricsAsync(
+        string[] metricNames, 
+        int lastMinutes = 30,
+        string aggregation = "Average")
+    {
+        var metrics = new Dictionary<string, List<(DateTime timestamp, double value)>>();
+        
+        try
+        {
+            // Get access token from DefaultAzureCredential
+            var credential = new DefaultAzureCredential();
+            var tokenRequestContext = new TokenRequestContext(new[] { "https://management.azure.com/.default" });
+            var accessToken = await credential.GetTokenAsync(tokenRequestContext);
+            
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken.Token);
+            
+            // Get the web app resource to build the resource ID
+            var webApp = await GetWebAppResource();
+            var resourceId = webApp.Id.ToString();
+            
+            // Build time range
+            var endTime = DateTime.UtcNow;
+            var startTime = endTime.AddMinutes(-lastMinutes);
+            var timespan = $"{startTime:yyyy-MM-ddTHH:mm:ss.fffZ}/{endTime:yyyy-MM-ddTHH:mm:ss.fffZ}";
+            
+            // Join metric names for the API call
+            var metricNamesParam = string.Join(",", metricNames);
+            
+            // Build the Azure Monitor REST API URL
+            var metricsUrl = $"https://management.azure.com{resourceId}/providers/Microsoft.Insights/metrics" +
+                           $"?api-version=2018-01-01" +
+                           $"&metricnames={metricNamesParam}" +
+                           $"&timespan={timespan}" +
+                           $"&interval=PT1M" +
+                           $"&aggregation={aggregation}";
+            
+            Console.WriteLine($"Retrieving metrics: {metricNamesParam} for the last {lastMinutes} minutes...");
+            
+            var response = await httpClient.GetAsync(metricsUrl);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"⚠️  Failed to retrieve metrics (Status: {(int)response.StatusCode}): {response.ReasonPhrase}");
+                return metrics;
+            }
+            
+            var content = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(content);
+            
+            if (doc.RootElement.TryGetProperty("value", out var metricsArray))
+            {
+                foreach (var metric in metricsArray.EnumerateArray())
+                {
+                    if (metric.TryGetProperty("name", out var nameElement) &&
+                        nameElement.TryGetProperty("value", out var metricNameElement))
+                    {
+                        var metricName = metricNameElement.GetString();
+                        if (string.IsNullOrEmpty(metricName)) continue;
+                        
+                        var dataPoints = new List<(DateTime timestamp, double value)>();
+                        
+                        if (metric.TryGetProperty("timeseries", out var timeseriesArray) && timeseriesArray.GetArrayLength() > 0)
+                        {
+                            var timeseries = timeseriesArray[0];
+                            if (timeseries.TryGetProperty("data", out var dataArray))
+                            {
+                                foreach (var dataPoint in dataArray.EnumerateArray())
+                                {
+                                    if (dataPoint.TryGetProperty("timeStamp", out var timestampElement) &&
+                                        DateTime.TryParse(timestampElement.GetString(), out var timestamp))
+                                    {
+                                        double? value = null;
+                                        
+                                        // Try to get the value based on the aggregation type
+                                        var aggregationLower = aggregation.ToLower();
+                                        if (dataPoint.TryGetProperty(aggregationLower, out var valueElement) && 
+                                            valueElement.ValueKind == JsonValueKind.Number)
+                                        {
+                                            value = valueElement.GetDouble();
+                                        }
+                                        else if (dataPoint.TryGetProperty("average", out valueElement) && 
+                                                valueElement.ValueKind == JsonValueKind.Number)
+                                        {
+                                            value = valueElement.GetDouble();
+                                        }
+                                        
+                                        if (value.HasValue)
+                                        {
+                                            dataPoints.Add((timestamp, value.Value));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        metrics[metricName] = dataPoints;
+                        Console.WriteLine($"✓ Retrieved {dataPoints.Count} data points for metric: {metricName}");
+                    }
+                }
+            }
+            
+            Console.WriteLine($"✓ Successfully retrieved metrics for {metrics.Count} metric types");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error retrieving application metrics: {ex.Message}");
+        }
+        
+        return metrics;
+    }
+
+    protected async Task<bool> CheckMetricThreshold(string metricName, double threshold, string comparison = "greater", int lastMinutes = 15)
+    {
+        try
+        {
+            var metrics = await GetApplicationMetricsAsync(new[] { metricName }, lastMinutes);
+            
+            if (!metrics.ContainsKey(metricName) || metrics[metricName].Count == 0)
+            {
+                Console.WriteLine($"⚠️  No data available for metric: {metricName}");
+                return false;
+            }
+            
+            var dataPoints = metrics[metricName];
+            var recentDataPoints = dataPoints.Where(dp => dp.timestamp >= DateTime.UtcNow.AddMinutes(-lastMinutes)).ToList();
+            
+            if (recentDataPoints.Count == 0)
+            {
+                Console.WriteLine($"⚠️  No recent data points for metric: {metricName}");
+                return false;
+            }
+            
+            // Check if any data points meet the threshold condition
+            foreach (var (timestamp, value) in recentDataPoints)
+            {
+                bool thresholdMet = comparison.ToLower() switch
+                {
+                    "greater" => value > threshold,
+                    "less" => value < threshold,
+                    "equal" => Math.Abs(value - threshold) < 0.01,
+                    "greaterequal" => value >= threshold,
+                    "lessequal" => value <= threshold,
+                    _ => value > threshold
+                };
+                
+                if (thresholdMet)
+                {
+                    Console.WriteLine($"✓ Metric threshold met: {metricName} = {value:F2} (threshold: {threshold}, comparison: {comparison}) at {timestamp:yyyy-MM-dd HH:mm:ss}");
+                    return true;
+                }
+            }
+            
+            // Show the recent values for context
+            var avgValue = recentDataPoints.Average(dp => dp.value);
+            var maxValue = recentDataPoints.Max(dp => dp.value);
+            Console.WriteLine($"ℹ️  Metric {metricName}: Average = {avgValue:F2}, Max = {maxValue:F2} (threshold: {threshold}, comparison: {comparison})");
+            
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error checking metric threshold for {metricName}: {ex.Message}");
+            return false;
+        }
+    }
 }
 
 // Scenario implementations
@@ -430,14 +930,154 @@ public class MissingEnvironmentVariableScenario : ScenarioBase
         await Task.Delay(30000); // Wait 30 seconds
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
-        if (_savedValue != null)
+        Console.WriteLine("Testing application state to identify missing environment variable...");
+        
+        try
         {
-            await UpdateAppSetting("SECRET_KEY", _savedValue);
-            Console.WriteLine("Restored SECRET_KEY app setting");
-            await Task.Delay(30000); // Wait 30 seconds
+            // First, try to make an HTTP request to see the current state
+            await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+            Console.WriteLine("⚠️  Application appears to be working, no environment variable issue detected");
+            return true;
         }
+        catch (Exception httpEx)
+        {
+            Console.WriteLine($"✓ Confirmed application failure: {httpEx.Message}");
+            
+            // Get application logs to find the specific error
+            var (consoleLogs, httpLogs) = await GetApplicationLogsAsync(10); // Last 10 minutes
+            
+            string? missingVariableName = null;
+            
+            // Look for environment variable errors in console logs
+            foreach (var logEntry in consoleLogs)
+            {
+                var lowerLogEntry = logEntry.ToLower();
+                
+                // Check for various patterns of environment variable errors
+                if (lowerLogEntry.Contains("environment variable") && 
+                    (lowerLogEntry.Contains("not found") || lowerLogEntry.Contains("missing") || lowerLogEntry.Contains("null")))
+                {
+                    // Try to extract variable name from the log message
+                    missingVariableName = ExtractVariableNameFromLog(logEntry);
+                    if (!string.IsNullOrEmpty(missingVariableName))
+                    {
+                        Console.WriteLine($"✓ Identified missing environment variable: {missingVariableName}");
+                        break;
+                    }
+                }
+                
+                // Check for ArgumentNullException related to environment variables
+                if (lowerLogEntry.Contains("argumentnullexception") && lowerLogEntry.Contains("environment"))
+                {
+                    missingVariableName = ExtractVariableNameFromLog(logEntry);
+                    if (!string.IsNullOrEmpty(missingVariableName))
+                    {
+                        Console.WriteLine($"✓ Identified missing environment variable from ArgumentNullException: {missingVariableName}");
+                        break;
+                    }
+                }
+                
+                // Check for specific SECRET_KEY errors (since this scenario removes SECRET_KEY)
+                if (lowerLogEntry.Contains("secret_key") && 
+                    (lowerLogEntry.Contains("not found") || lowerLogEntry.Contains("missing") || lowerLogEntry.Contains("null")))
+                {
+                    missingVariableName = "SECRET_KEY";
+                    Console.WriteLine($"✓ Identified missing environment variable: {missingVariableName}");
+                    break;
+                }
+            }
+            
+            // If no specific variable found in logs, return false
+            if (string.IsNullOrEmpty(missingVariableName))
+            {
+                Console.WriteLine("⚠️  Could not extract variable name from logs, unable to proceed with recovery");
+                return false;
+            }
+            
+            // Restore the environment variable
+            if (_savedValue != null && !string.IsNullOrEmpty(missingVariableName))
+            {
+                Console.WriteLine($"Restoring environment variable '{missingVariableName}' with saved value...");
+                await UpdateAppSetting(missingVariableName, _savedValue);
+                Console.WriteLine($"✓ Restored {missingVariableName} app setting");
+                
+                // Wait for the change to take effect
+                await Task.Delay(30000);
+                
+                // Verify the fix worked
+                try
+                {
+                    await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+                    Console.WriteLine($"✓ Application recovery successful after restoring {missingVariableName}");
+                    return true;
+                }
+                catch (Exception verifyEx)
+                {
+                    Console.WriteLine($"⚠️  Application still failing after restoring {missingVariableName}: {verifyEx.Message}");
+                    return false;
+                }
+            }
+            else
+            {
+                Console.WriteLine("⚠️  Cannot restore environment variable: no saved value available");
+                return false;
+            }
+        }
+    }
+    
+    private string? ExtractVariableNameFromLog(string logEntry)
+    {
+        try
+        {
+            // Try various patterns to extract variable name
+            var patterns = new[]
+            {
+                @"environment variable['\s]*([A-Z_]+)['\s]*not found",
+                @"([A-Z_]+)['\s]*environment variable['\s]*not found",
+                @"missing['\s]*environment variable['\s]*([A-Z_]+)",
+                @"([A-Z_]+)['\s]*is['\s]*not['\s]*set",
+                @"ArgumentNullException.*parameter['\s]*([A-Z_]+)",
+                @"variable['\s]*([A-Z_]+)['\s]*is['\s]*null",
+                @"SECRET_KEY", // Specific for this scenario
+            };
+            
+            foreach (var pattern in patterns)
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(logEntry, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (match.Success)
+                {
+                    if (pattern == "SECRET_KEY")
+                    {
+                        return "SECRET_KEY";
+                    }
+                    else if (match.Groups.Count > 1 && !string.IsNullOrEmpty(match.Groups[1].Value))
+                    {
+                        var variableName = match.Groups[1].Value.Trim('\'', '"', ' ').ToUpper();
+                        if (IsValidEnvironmentVariableName(variableName))
+                        {
+                            return variableName;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error extracting variable name from log: {ex.Message}");
+        }
+        
+        return null;
+    }
+    
+    private bool IsValidEnvironmentVariableName(string name)
+    {
+        // Check if the extracted name looks like a valid environment variable name
+        return !string.IsNullOrEmpty(name) && 
+               name.Length > 1 && 
+               name.All(c => char.IsLetterOrDigit(c) || c == '_') &&
+               char.IsLetter(name[0]);
     }
 }
 
@@ -461,14 +1101,169 @@ public class MissingConnectionStringScenario : ScenarioBase
         await Task.Delay(30000); // Wait 30 seconds
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
-        if (_savedValue != null)
+        Console.WriteLine("Testing application state to identify missing connection string...");
+        
+        try
         {
-            await UpdateAppSetting("DATABASE_URL", _savedValue);
-            Console.WriteLine("Restored DATABASE_URL app setting");
-            await Task.Delay(30000); // Wait 30 seconds
+            // First, try to make an HTTP request to see the current state
+            await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+            Console.WriteLine("⚠️  Application appears to be working, no connection string issue detected");
+            return true;
         }
+        catch (Exception httpEx)
+        {
+            Console.WriteLine($"✓ Confirmed application failure: {httpEx.Message}");
+            
+            // Get application logs to find the specific error
+            var (consoleLogs, httpLogs) = await GetApplicationLogsAsync(10); // Last 10 minutes
+            
+            string? missingConnectionStringName = null;
+            
+            // Look for connection string errors in console logs
+            foreach (var logEntry in consoleLogs)
+            {
+                var lowerLogEntry = logEntry.ToLower();
+                
+                // Check for various patterns of connection string errors
+                if (lowerLogEntry.Contains("database connection string") && 
+                    (lowerLogEntry.Contains("missing") || lowerLogEntry.Contains("not found") || lowerLogEntry.Contains("null")))
+                {
+                    // Try to extract connection string name from the log message
+                    missingConnectionStringName = ExtractConnectionStringNameFromLog(logEntry);
+                    if (!string.IsNullOrEmpty(missingConnectionStringName))
+                    {
+                        Console.WriteLine($"✓ Identified missing database connection string: {missingConnectionStringName}");
+                        break;
+                    }
+                }
+                
+                // Check for database connection errors
+                if ((lowerLogEntry.Contains("database") || lowerLogEntry.Contains("connection")) && 
+                    (lowerLogEntry.Contains("not found") || lowerLogEntry.Contains("missing") || lowerLogEntry.Contains("null") || lowerLogEntry.Contains("empty")))
+                {
+                    missingConnectionStringName = ExtractConnectionStringNameFromLog(logEntry);
+                    if (!string.IsNullOrEmpty(missingConnectionStringName))
+                    {
+                        Console.WriteLine($"✓ Identified missing connection string: {missingConnectionStringName}");
+                        break;
+                    }
+                }
+                
+                // Check for specific DATABASE_URL errors (since this scenario removes DATABASE_URL)
+                if (lowerLogEntry.Contains("database_url") && 
+                    (lowerLogEntry.Contains("not found") || lowerLogEntry.Contains("missing") || lowerLogEntry.Contains("null")))
+                {
+                    missingConnectionStringName = "DATABASE_URL";
+                    Console.WriteLine($"✓ Identified missing connection string: {missingConnectionStringName}");
+                    break;
+                }
+                
+                // Check for PostgreSQL connection errors
+                if ((lowerLogEntry.Contains("postgresql") || lowerLogEntry.Contains("postgres")) && 
+                    (lowerLogEntry.Contains("connection") || lowerLogEntry.Contains("connect")) &&
+                    (lowerLogEntry.Contains("failed") || lowerLogEntry.Contains("error") || lowerLogEntry.Contains("unable")))
+                {
+                    missingConnectionStringName = "DATABASE_URL"; // Default for this scenario
+                    Console.WriteLine($"✓ Identified PostgreSQL connection issue, assuming DATABASE_URL: {missingConnectionStringName}");
+                    break;
+                }
+            }
+            
+            // If no specific connection string found in logs, return false
+            if (string.IsNullOrEmpty(missingConnectionStringName))
+            {
+                Console.WriteLine("⚠️  Could not extract connection string name from logs, unable to proceed with recovery");
+                return false;
+            }
+            
+            // Restore the connection string
+            if (_savedValue != null && !string.IsNullOrEmpty(missingConnectionStringName))
+            {
+                Console.WriteLine($"Restoring database connection string '{missingConnectionStringName}' with saved value...");
+                await UpdateAppSetting(missingConnectionStringName, _savedValue);
+                Console.WriteLine($"✓ Restored {missingConnectionStringName} app setting");
+                
+                // Wait for the change to take effect
+                await Task.Delay(30000);
+                
+                // Verify the fix worked
+                try
+                {
+                    await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+                    Console.WriteLine($"✓ Application recovery successful after restoring {missingConnectionStringName}");
+                    return true;
+                }
+                catch (Exception verifyEx)
+                {
+                    Console.WriteLine($"⚠️  Application still failing after restoring {missingConnectionStringName}: {verifyEx.Message}");
+                    return false;
+                }
+            }
+            else
+            {
+                Console.WriteLine("⚠️  Cannot restore connection string: no saved value available");
+                return false;
+            }
+        }
+    }
+    
+    private string? ExtractConnectionStringNameFromLog(string logEntry)
+    {
+        try
+        {
+            // Try various patterns to extract connection string name
+            var patterns = new[]
+            {
+                @"database connection string['\s]*([A-Z_]+)['\s]*missing",
+                @"missing['\s]*database connection string['\s]*([A-Z_]+)",
+                @"connection string['\s]*([A-Z_]+)['\s]*not found",
+                @"([A-Z_]+)['\s]*connection string['\s]*not found",
+                @"([A-Z_]+)['\s]*database['\s]*connection['\s]*missing",
+                @"database['\s]*([A-Z_]+)['\s]*not found",
+                @"([A-Z_]+)['\s]*is['\s]*null['\s]*or['\s]*empty",
+                @"DATABASE_URL", // Specific for this scenario
+                @"CONNECTION_STRING",
+                @"DB_CONNECTION",
+            };
+            
+            foreach (var pattern in patterns)
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(logEntry, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (match.Success)
+                {
+                    if (pattern == "DATABASE_URL" || pattern == "CONNECTION_STRING" || pattern == "DB_CONNECTION")
+                    {
+                        return pattern;
+                    }
+                    else if (match.Groups.Count > 1 && !string.IsNullOrEmpty(match.Groups[1].Value))
+                    {
+                        var connectionStringName = match.Groups[1].Value.Trim('\'', '"', ' ').ToUpper();
+                        if (IsValidConnectionStringName(connectionStringName))
+                        {
+                            return connectionStringName;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error extracting connection string name from log: {ex.Message}");
+        }
+        
+        return null;
+    }
+    
+    private bool IsValidConnectionStringName(string name)
+    {
+        // Check if the extracted name looks like a valid connection string name
+        return !string.IsNullOrEmpty(name) && 
+               name.Length > 1 && 
+               name.All(c => char.IsLetterOrDigit(c) || c == '_') &&
+               char.IsLetter(name[0]) &&
+               (name.Contains("DATABASE") || name.Contains("CONNECTION") || name.Contains("DB") || name.Contains("URL"));
     }
 }
 
@@ -489,10 +1284,141 @@ public class HighMemoryScenario : ScenarioBase
         Console.WriteLine("Completed high memory requests");
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
-        Console.WriteLine("Waiting 60 seconds for memory to stabilize...");
-        await Task.Delay(60000);
+        Console.WriteLine("Analyzing memory usage metrics to determine if intervention is needed...");
+        
+        try
+        {
+            // First, check actual memory metrics from Azure Monitor
+            Console.WriteLine("Retrieving memory usage metrics from Azure Monitor...");
+            var highMemoryDetectedFromMetrics = await CheckMetricThreshold("MemoryPercentage", 85.0, "greaterequal", 15);
+            
+            bool highMemoryDetected = highMemoryDetectedFromMetrics;
+            string? highMemoryMessage = null;
+            
+            if (highMemoryDetectedFromMetrics)
+            {
+                // Get detailed metrics to show the actual values
+                var metrics = await GetApplicationMetricsAsync(new[] { "MemoryPercentage" }, 15);
+                if (metrics.ContainsKey("MemoryPercentage") && metrics["MemoryPercentage"].Count > 0)
+                {
+                    var recentDataPoints = metrics["MemoryPercentage"]
+                        .Where(dp => dp.timestamp >= DateTime.UtcNow.AddMinutes(-15))
+                        .OrderByDescending(dp => dp.timestamp)
+                        .ToList();
+                    
+                    if (recentDataPoints.Count > 0)
+                    {
+                        var maxMemory = recentDataPoints.Max(dp => dp.value);
+                        var avgMemory = recentDataPoints.Average(dp => dp.value);
+                        var latestMemory = recentDataPoints.First().value;
+                        
+                        highMemoryMessage = $"Memory usage exceeded 85% - Latest: {latestMemory:F1}%, Average: {avgMemory:F1}%, Peak: {maxMemory:F1}%";
+                        Console.WriteLine($"✓ High memory usage detected from metrics: {highMemoryMessage}");
+                    }
+                }
+            }
+            else
+            {
+                Console.WriteLine("ℹ️  Memory metrics show usage below 85% threshold, checking application logs for memory issues...");
+                
+                // Fallback: Get application logs to check for memory-related errors
+                var (consoleLogs, httpLogs) = await GetApplicationLogsAsync(15); // Last 15 minutes
+                
+                // Look for high memory usage indicators in console logs
+                foreach (var logEntry in consoleLogs)
+                {
+                    var lowerLogEntry = logEntry.ToLower();
+                    
+                    // Check for memory usage patterns
+                    if (lowerLogEntry.Contains("memory") && 
+                        (lowerLogEntry.Contains("90%") || lowerLogEntry.Contains("85%") || lowerLogEntry.Contains("high") || 
+                         lowerLogEntry.Contains("exceeded") || lowerLogEntry.Contains("critical")))
+                    {
+                        highMemoryDetected = true;
+                        highMemoryMessage = logEntry;
+                        Console.WriteLine($"✓ High memory usage detected in logs: {logEntry}");
+                        break;
+                    }
+                    
+                    // Check for OutOfMemoryException
+                    if (lowerLogEntry.Contains("outofmemoryexception") || lowerLogEntry.Contains("out of memory"))
+                    {
+                        highMemoryDetected = true;
+                        highMemoryMessage = logEntry;
+                        Console.WriteLine($"✓ Out of memory condition detected: {logEntry}");
+                        break;
+                    }
+                    
+                    // Check for memory pressure indicators
+                    if ((lowerLogEntry.Contains("memory pressure") || lowerLogEntry.Contains("low memory")) ||
+                        (lowerLogEntry.Contains("gc") && lowerLogEntry.Contains("pressure")))
+                    {
+                        highMemoryDetected = true;
+                        highMemoryMessage = logEntry;
+                        Console.WriteLine($"✓ Memory pressure detected: {logEntry}");
+                        break;
+                    }
+                }
+            }
+            
+            // If high memory detected, restart the app
+            if (highMemoryDetected)
+            {
+                Console.WriteLine($"🔴 High memory usage confirmed: {highMemoryMessage ?? "Memory usage >= 85%"}");
+                Console.WriteLine("Restarting application to clear memory...");
+                
+                await RestartApp();
+                
+                Console.WriteLine("Waiting 30 seconds for app to restart and stabilize...");
+                await Task.Delay(30000);
+                
+                // Verify the app is working after restart
+                try
+                {
+                    await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+                    Console.WriteLine("✓ Application recovery successful after restart");
+                    
+                    // Optional: Check if memory usage improved after restart
+                    Console.WriteLine("Checking memory usage after restart...");
+                    await Task.Delay(30000); // Wait a bit more for metrics to update
+                    
+                    var postRestartMemoryHigh = await CheckMetricThreshold("MemoryPercentage", 85.0, "greaterequal", 5);
+                    if (!postRestartMemoryHigh)
+                    {
+                        Console.WriteLine("✓ Memory usage improved after restart");
+                    }
+                    else
+                    {
+                        Console.WriteLine("⚠️  Memory usage still high after restart - may need further investigation");
+                    }
+                    
+                    return true;
+                }
+                catch (Exception verifyEx)
+                {
+                    Console.WriteLine($"⚠️  Application still having issues after restart: {verifyEx.Message}");
+                    Console.WriteLine("Waiting additional 60 seconds for memory to stabilize...");
+                    await Task.Delay(60000);
+                    return false;
+                }
+            }
+            else
+            {
+                Console.WriteLine("ℹ️  No high memory usage detected (< 85% threshold)");
+                Console.WriteLine("Waiting 60 seconds for memory to stabilize naturally...");
+                await Task.Delay(60000);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error analyzing memory metrics: {ex.Message}");
+            Console.WriteLine("Falling back to standard memory stabilization wait...");
+            await Task.Delay(60000);
+            return false;
+        }
     }
 }
 
@@ -513,10 +1439,95 @@ public class SnatPortExhaustionScenario : ScenarioBase
         Console.WriteLine("Completed SNAT exhaustion requests");
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
-        Console.WriteLine("Waiting 60 seconds for SNAT ports to be released...");
-        await Task.Delay(60000);
+        Console.WriteLine("Analyzing socket usage metrics to determine if SNAT port exhaustion recovery is needed...");
+        
+        try
+        {
+            // Check actual socket metrics from Azure Monitor
+            Console.WriteLine("Retrieving socket usage metrics from Azure Monitor...");
+            var highSocketUsageDetected = await CheckMetricThreshold("SocketOutboundAll", 100.0, "greater", 15);
+            
+            if (highSocketUsageDetected)
+            {
+                // Get detailed metrics to show the actual values
+                var metrics = await GetApplicationMetricsAsync(new[] { "SocketOutboundAll" }, 15);
+                if (metrics.ContainsKey("SocketOutboundAll") && metrics["SocketOutboundAll"].Count > 0)
+                {
+                    var recentDataPoints = metrics["SocketOutboundAll"]
+                        .Where(dp => dp.timestamp >= DateTime.UtcNow.AddMinutes(-15))
+                        .OrderByDescending(dp => dp.timestamp)
+                        .ToList();
+                    
+                    if (recentDataPoints.Count > 0)
+                    {
+                        var maxSockets = recentDataPoints.Max(dp => dp.value);
+                        var avgSockets = recentDataPoints.Average(dp => dp.value);
+                        var latestSockets = recentDataPoints.First().value;
+                        
+                        Console.WriteLine($"✓ High socket usage detected - Latest: {latestSockets:F0}, Average: {avgSockets:F0}, Peak: {maxSockets:F0} (threshold: 100)");
+                        Console.WriteLine($"🔴 SNAT port exhaustion confirmed - socket count above 100");
+                        Console.WriteLine("Restarting application to release sockets and clear SNAT port usage...");
+                        
+                        await RestartApp();
+                        
+                        Console.WriteLine("Waiting 30 seconds for app to restart and SNAT ports to be released...");
+                        await Task.Delay(30000);
+                        
+                        // Verify the app is working after restart
+                        try
+                        {
+                            await MakeHttpRequest(TargetAddress, expectedSuccess: true);
+                            Console.WriteLine("✓ Application recovery successful after restart");
+                            
+                            // Check if socket usage improved after restart
+                            Console.WriteLine("Checking socket usage after restart...");
+                            await Task.Delay(30000); // Wait a bit more for metrics to update
+                            
+                            var postRestartSocketsHigh = await CheckMetricThreshold("SocketOutboundAll", 100.0, "greater", 5);
+                            if (!postRestartSocketsHigh)
+                            {
+                                Console.WriteLine("✓ Socket usage improved after restart - SNAT port exhaustion resolved");
+                            }
+                            else
+                            {
+                                Console.WriteLine("⚠️  Socket usage still high after restart - may need further investigation");
+                            }
+                            
+                            return true;
+                        }
+                        catch (Exception verifyEx)
+                        {
+                            Console.WriteLine($"⚠️  Application still having issues after restart: {verifyEx.Message}");
+                            Console.WriteLine("Waiting additional 60 seconds for SNAT ports to be released...");
+                            await Task.Delay(60000);
+                            return false;
+                        }
+                    }
+                }
+                
+                // Fallback if we can't get detailed metrics but threshold was met
+                Console.WriteLine("🔴 SNAT port exhaustion detected from metrics - restarting application...");
+                await RestartApp();
+                await Task.Delay(30000);
+                return true;
+            }
+            else
+            {
+                Console.WriteLine("ℹ️  Socket usage below threshold (≤ 100), no SNAT port exhaustion detected");
+                Console.WriteLine("Waiting 60 seconds for SNAT ports to be released naturally...");
+                await Task.Delay(60000);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️  Error analyzing socket metrics: {ex.Message}");
+            Console.WriteLine("Falling back to standard SNAT port release wait...");
+            await Task.Delay(60000);
+            return false;
+        }
     }
 }
 
@@ -533,7 +1544,7 @@ public class IncorrectStartupCommandScenario : ScenarioBase
         await Task.Delay(30000); // Wait 30 seconds
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         await UpdateAppSetting("AZURE_WEBAPP_STARTUP_COMMAND", null);
         Console.WriteLine("Removed incorrect startup command");
@@ -558,7 +1569,7 @@ public class HighCpuScenario : ScenarioBase
         Console.WriteLine("Completed high CPU requests");
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Waiting 60 seconds for CPU to stabilize...");
         await Task.Delay(60000);
@@ -587,7 +1598,7 @@ public class MisconfiguredConnectionStringScenario : ScenarioBase
         await Task.Delay(30000); // Wait 30 seconds
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         if (_savedValue != null)
         {
@@ -634,7 +1645,7 @@ public class SpecificApiPathsFailingScenario : ScenarioBase
         await MakeHttpRequestExpecting404(productsUrl);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Adding PRODUCTS_ENABLED = 1 and restarting app...");
         
@@ -675,7 +1686,7 @@ public class MissingEntryPointScenario : ScenarioBase
         await Task.Delay(30000);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Removing startup command setting and restarting app...");
         
@@ -706,7 +1717,7 @@ public class SqlConnectionRejectedScenario : ScenarioBase
         await Task.Delay(5000);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Simulating private endpoint connection restoration...");
         await Task.Delay(5000);
@@ -726,7 +1737,7 @@ public class SqlServerNotRespondingScenario : ScenarioBase
         await Task.Delay(5000);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Simulating PostgreSQL server start...");
         await Task.Delay(5000);
@@ -746,7 +1757,7 @@ public class FirewallBlocksConnectionScenario : ScenarioBase
         await Task.Delay(5000);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Simulating firewall rule removal...");
         await Task.Delay(5000);
@@ -766,7 +1777,7 @@ public class MissingDependencyScenario : ScenarioBase
         await Task.Delay(5000);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Simulating slot swap back to working version...");
         await Task.Delay(5000);
@@ -840,7 +1851,7 @@ public class VNetIntegrationBreaksConnectivityScenario : ScenarioBase
         await Task.Delay(30000);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Reconnecting VNET integration...");
         
@@ -1043,7 +2054,7 @@ public class MisconfiguredDnsScenario : ScenarioBase
         await Task.Delay(30000);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Restoring inherited DNS server settings on VNet...");
         
@@ -1232,7 +2243,7 @@ public class IncorrectDockerImageScenario : ScenarioBase
         await Task.Delay(30000);
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Restoring LinuxFxVersion setting and restarting app...");
         
@@ -1291,7 +2302,7 @@ public class IncorrectWriteAccessScenario : ScenarioBase
         }
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Waiting for write access issue to resolve...");
         
@@ -1568,7 +2579,7 @@ public class AppRestartsTriggeredByAutoHealScenario : ScenarioBase
         }
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Disabling the auto heal rule...");
         
@@ -1844,7 +2855,7 @@ public class PoorlyTunedAutoHealRulesScenario : ScenarioBase
         }
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Disabling the auto heal rule...");
         
@@ -2133,7 +3144,7 @@ public class ColdStartsAfterScaleOutScenario : ScenarioBase
         }
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine($"Scaling back to {_originalInstanceCount} instance(s)...");
         
@@ -2251,7 +3262,7 @@ public class PublishBrokenZipFileScenario : ScenarioBase
         Console.WriteLine("Broken zip file deployed and app restarted");
     }
 
-    public override async Task Recover()
+    public override async Task<bool> Recover()
     {
         Console.WriteLine("Publishing normal zip file to production slot for recovery...");
         var zipPath = Path.Combine(ZipDirectory!, "SampleMarketingApp.zip");
